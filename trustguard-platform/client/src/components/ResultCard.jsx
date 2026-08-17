@@ -1,9 +1,7 @@
-import React from 'react';
-
 export default function ResultCard({ result, type }) {
   if (!result) return null;
 
-  const { label, confidence, badgeClass, metrics, explanation, riskLevel } = result;
+  const { label, confidence, metrics, explanation, riskLevel } = result;
 
   // Custom glows and badges based on results
   const isSafe = label === 'Real' || label === 'Genuine' || label === 'Safe';

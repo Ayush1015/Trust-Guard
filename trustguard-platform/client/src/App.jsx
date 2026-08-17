@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Navbar from './components/Navbar';
 import TabNavigation from './components/TabNavigation';
 import NewsInput from './components/NewsInput';
@@ -13,10 +13,11 @@ function App() {
   const [error, setError] = useState(null);
 
   // Clear previous results and errors when switching modules
-  useEffect(() => {
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
     setResult(null);
     setError(null);
-  }, [activeTab]);
+  };
 
   const handleAnalysisSubmit = async (payload) => {
     setLoading(true);
@@ -65,7 +66,7 @@ function App() {
         </div>
 
         {/* Tab Selector */}
-        <TabNavigation activeTab={activeTab} setActiveTab={setActiveTab} />
+        <TabNavigation activeTab={activeTab} setActiveTab={handleTabChange} />
 
         {/* Content Panel */}
         <div className="row justify-content-center">

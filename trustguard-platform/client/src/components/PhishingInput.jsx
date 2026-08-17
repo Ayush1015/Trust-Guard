@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 export default function PhishingInput({ onSubmit, loading }) {
   const [url, setUrl] = useState('');
