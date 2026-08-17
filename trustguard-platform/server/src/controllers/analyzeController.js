@@ -12,7 +12,6 @@ export const analyzeNews = async (req, res) => {
       });
     }
 
-    /*
     // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
     // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
     
@@ -30,7 +29,6 @@ export const analyzeNews = async (req, res) => {
     } catch (mlErr) {
       console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
     }
-    */
 
     // Demo/Fallback Processing Logic
     const cleanedText = text.toLowerCase();
@@ -94,7 +92,6 @@ export const analyzeReview = async (req, res) => {
       });
     }
 
-    /*
     // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
     // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
     
@@ -112,7 +109,6 @@ export const analyzeReview = async (req, res) => {
     } catch (mlErr) {
       console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
     }
-    */
 
     // Demo/Fallback Processing Logic
     const cleanedText = text.toLowerCase();
@@ -172,7 +168,6 @@ export const analyzePhishing = async (req, res) => {
       });
     }
 
-    /*
     // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
     // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
     
@@ -190,7 +185,6 @@ export const analyzePhishing = async (req, res) => {
     } catch (mlErr) {
       console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
     }
-    */
 
     // Demo/Fallback Processing Logic
     const lowerUrl = url.toLowerCase();
