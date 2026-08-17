@@ -1,10 +1,17 @@
 import os
+# pyrefly: ignore [missing-import]
 import joblib
+# pyrefly: ignore [missing-import]
 import numpy as np
+# pyrefly: ignore [missing-import]
 import pandas as pd
+# pyrefly: ignore [missing-import]
 from sklearn.feature_extraction.text import TfidfVectorizer
+# pyrefly: ignore [missing-import]
 from sklearn.linear_model import LogisticRegression
+# pyrefly: ignore [missing-import]
 from sklearn.naive_bayes import MultinomialNB
+# pyrefly: ignore [missing-import]
 from sklearn.ensemble import RandomForestClassifier
 
 # Ensure models directory exists
@@ -113,7 +120,7 @@ def extract_url_features(url):
     lower_url = url.lower()
     
     # 1. SSL Protocol check
-    ssl_valid = 1 if url.startswith('https://') else 0
+    ssl_valid = 1 if lower_url.startswith('https://') else 0
     
     # 2. Suspicious keywords presence
     suspicious_keywords = ['login', 'signin', 'verify', 'update-account', 'secure-bank', 'paypal', 'netflix-secure', 'wallet', 'crypto']

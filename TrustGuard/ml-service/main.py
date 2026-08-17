@@ -1,11 +1,10 @@
 import os
 # pyrefly: ignore [missing-import]
 import joblib
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-app = FastAPI(title="TrustGuard ML Inference Service")
 
 # CORS middleware config
 app.add_middleware(
@@ -25,7 +24,13 @@ review_model = None
 review_vectorizer = None
 phishing_model = None
 
-@app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_models()
+    yield
+
+app = FastAPI(title="TrustGuard ML Inference Service", lifespan=lifespan)
+
 def load_models():
     global news_model, news_vectorizer, review_model, review_vectorizer, phishing_model
     try:
@@ -47,7 +52,7 @@ class UrlPayload(BaseModel):
 
 def extract_url_features(url):
     lower_url = url.lower()
-    ssl_valid = 1 if url.startswith('https://') else 0
+    ssl_valid = 1 if lower_url.startswith('https://') else 0
     
     suspicious_keywords = ['login', 'signin', 'verify', 'update-account', 'secure-bank', 'paypal', 'netflix-secure', 'wallet', 'crypto']
     suspicious_keyword = 1 if any(kw in lower_url for kw in suspicious_keywords) else 0
