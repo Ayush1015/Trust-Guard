@@ -1,15 +1,61 @@
 import express from 'express';
+
 import {
   analyzeNews,
   analyzeReview,
-  analyzePhishing
+  analyzePhishing,
+  translateNews,
+  summarizeNews,
+  analysisHealth
 } from '../controllers/analyzeController.js';
 
 const router = express.Router();
 
-// Define router endpoints mapping to analyzeController methods
-router.post('/analyze/news', analyzeNews);
-router.post('/analyze/review', analyzeReview);
-router.post('/analyze/phishing', analyzePhishing);
+
+// ============================================================
+// ANALYSIS ROUTES
+// ============================================================
+
+// Fake News
+router.post(
+  '/analyze/news',
+  analyzeNews
+);
+
+
+// Fake Reviews
+router.post(
+  '/analyze/review',
+  analyzeReview
+);
+
+
+// Phishing URL
+router.post(
+  '/analyze/phishing',
+  analyzePhishing
+);
+
+
+// News Translation
+router.post(
+  '/analyze/news/translate',
+  translateNews
+);
+
+
+// News Summary
+router.post(
+  '/analyze/news/summary',
+  summarizeNews
+);
+
+
+// Analysis service health
+router.get(
+  '/analyze/health',
+  analysisHealth
+);
+
 
 export default router;

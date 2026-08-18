@@ -1,261 +1,1111 @@
 /**
- * 1. POST /api/v1/analyze/news
- * Payload: { text: string }
+ * TrustGuard Analysis Gateway
+ *
+ * Node/Express API
+ *        ↓
+ * Python FastAPI ML Service
+ *        ↓
+ * ┌──────────────┬──────────────┬──────────────┐
+ * │ Local Models │ Kaggle Models│ Gemini/Web   │
+ * └──────────────┴──────────────┴──────────────┘
+ *                       ↓
+ *                  MODEL POLL
+ *                       ↓
+ *                  FINAL RESULT
+ *
+ * IMPORTANT:
+ * This gateway does NOT create fake fallback predictions.
+ * If the ML service is unavailable, it returns an error.
  */
-export const analyzeNews = async (req, res) => {
+
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+const getMLServiceUrl = () => {
+  return (
+    process.env.PYTHON_ML_SERVICE_URL ||
+    'http://127.0.0.1:8000'
+  );
+};
+
+
+/**
+ * Safely call Python ML service.
+ */
+const callMLService = async (
+  endpoint,
+  payload,
+  options = {}
+) => {
+
+  const mlServiceUrl = getMLServiceUrl();
+
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, options.timeout || 60000);
+
   try {
-    const { text } = req.body;
 
-    if (!text || typeof text !== 'string' || text.trim().length < 15) {
-      return res.status(400).json({
-        error: { message: 'Input text must be at least 15 characters long.' }
-      });
-    }
-
-    // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
-    // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
-    
-    try {
-      const mlServiceUrl = process.env.PYTHON_ML_SERVICE_URL || 'http://127.0.0.1:8000';
-      const response = await fetch(`${mlServiceUrl}/analyze/news`, {
+    const response = await fetch(
+      `${mlServiceUrl}${endpoint}`,
+      {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      });
-      if (response.ok) {
-        const mlData = await response.json();
-        return res.status(200).json(mlData);
+
+        headers: {
+          'Content-Type': 'application/json',
+
+          // Forward authenticated user information
+          // if your auth middleware provides it.
+          ...(options.headers || {})
+        },
+
+        body: JSON.stringify(
+          payload
+        ),
+
+        signal:
+          controller.signal
       }
-    } catch (mlErr) {
-      console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
-    }
+    );
 
-    // Demo/Fallback Processing Logic
-    const cleanedText = text.toLowerCase();
-    
-    // Check for common fake news patterns / sensationalism keywords
-    const sensationalWords = ['conspiracy', 'shocking', 'secret', 'miracle cure', '5g waves', 'scam', 'propaganda', 'unbelievable', 'aliens', 'lizard people'];
-    const matchesSensational = sensationalWords.filter(word => cleanedText.includes(word));
-    
-    let label = 'Real';
-    let confidence = 85.4;
-    let aiLikelihood = 12.5;
-    let linguisticPatternMatch = 91.2;
-    let badgeClass = 'success';
+    const contentType =
+      response.headers.get(
+        'content-type'
+      ) || '';
 
-    if (matchesSensational.length > 0 || cleanedText.length < 50) {
-      label = 'Fake';
-      confidence = 78.0 + (matchesSensational.length * 5) > 99.9 ? 99.9 : 78.0 + (matchesSensational.length * 5);
-      aiLikelihood = 65.0 + (matchesSensational.length * 8) > 98.0 ? 98.0 : 65.0 + (matchesSensational.length * 8);
-      linguisticPatternMatch = 42.1;
-      badgeClass = 'danger';
+    let data;
+
+    if (
+      contentType.includes(
+        'application/json'
+      )
+    ) {
+
+      data =
+        await response.json();
+
     } else {
-      // Dynamic variance based on length
-      confidence = (75 + (text.length % 23)).toFixed(1);
-      aiLikelihood = (8 + (text.length % 15)).toFixed(1);
-      linguisticPatternMatch = (88 + (text.length % 10)).toFixed(1);
+
+      data =
+        await response.text();
     }
 
-    return res.status(200).json({
-      success: true,
-      label,
-      confidence: parseFloat(confidence),
-      badgeClass,
-      metrics: {
-        linguisticStyleMatch: parseFloat(linguisticPatternMatch),
-        aiTextProbability: parseFloat(aiLikelihood)
-      },
-      explanation: label === 'Fake' 
-        ? `Sensationalized vocabulary or atypical linguistic patterns detected (matched flags: ${matchesSensational.join(', ') || 'short/abrupt reporting'}).` 
-        : 'The content follows standard structural guidelines for professional journalism and aligns with trustworthy linguistic profiles.'
-    });
+    if (!response.ok) {
+
+      const message =
+        typeof data === 'object'
+          ? data.detail ||
+            data.error?.message ||
+            'ML service returned an error.'
+          : data ||
+            'ML service returned an error.';
+
+      const error =
+        new Error(message);
+
+      error.status =
+        response.status;
+
+      throw error;
+    }
+
+    return data;
+
+  } finally {
+
+    clearTimeout(
+      timeout
+    );
+  }
+};
+
+
+// ============================================================
+// NEWS
+// ============================================================
+
+/**
+ * POST /api/v1/analyze/news
+ *
+ * Supports:
+ *
+ * {
+ *   "text": "headline..."
+ * }
+ *
+ * OR
+ *
+ * {
+ *   "headline": "headline...",
+ *   "article_url": "https://..."
+ * }
+ *
+ * OR
+ *
+ * {
+ *   "headline": "...",
+ *   "article_url": "...",
+ *   "article_text": "..."
+ * }
+ *
+ * Gemini:
+ *
+ * - User Gemini authorization can be forwarded
+ *   by your authentication layer.
+ *
+ * - If the user has no Gemini authorization,
+ *   Python can use the TrustGuard server Gemini
+ *   configuration.
+ */
+export const analyzeNews = async (
+  req,
+  res
+) => {
+
+  try {
+
+    const {
+      text = '',
+      headline = '',
+      article_url = '',
+      article_text = '',
+      mode = 'auto'
+    } = req.body || {};
+
+
+    // --------------------------------------------------------
+    // Normalize input
+    // --------------------------------------------------------
+
+    const legacyText =
+      typeof text === 'string'
+        ? text.trim()
+        : '';
+
+    const newsHeadline =
+      typeof headline === 'string'
+        ? headline.trim()
+        : '';
+
+    const articleUrl =
+      typeof article_url === 'string'
+        ? article_url.trim()
+        : '';
+
+    const articleText =
+      typeof article_text === 'string'
+        ? article_text.trim()
+        : '';
+
+
+    // --------------------------------------------------------
+    // Backward compatibility
+    //
+    // Existing frontend:
+    //
+    // { text: "..." }
+    //
+    // continues to work.
+    // --------------------------------------------------------
+
+    const finalHeadline =
+      newsHeadline ||
+      legacyText;
+
+
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
+    if (
+      !finalHeadline &&
+      !articleUrl &&
+      !articleText
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Provide a headline, article URL, or article text.'
+        }
+
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // Validate minimum content
+    // --------------------------------------------------------
+
+    const totalInputLength =
+      (
+        finalHeadline +
+        articleUrl +
+        articleText
+      ).trim().length;
+
+    if (
+      totalInputLength < 15
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'News input must contain at least 15 characters.'
+        }
+
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // Build Python payload
+    // --------------------------------------------------------
+
+    const payload = {
+
+      // Legacy compatibility
+      text:
+        finalHeadline,
+
+      // New functionality
+      headline:
+        finalHeadline,
+
+      article_url:
+        articleUrl,
+
+      article_text:
+        articleText,
+
+      mode:
+        mode || 'auto'
+    };
+
+
+    // --------------------------------------------------------
+    // Optional user authentication context
+    // --------------------------------------------------------
+    //
+    // DO NOT send raw OAuth secrets from the browser.
+    //
+    // If your authentication middleware has already
+    // authenticated the user, use a server-side identifier
+    // or secure credential reference.
+    //
+    // Example:
+    //
+    // req.user.id
+    //
+    // The Python service can then resolve the user's
+    // authorized Gemini credentials.
+    // --------------------------------------------------------
+
+    if (req.user) {
+
+      payload.user_id =
+        req.user.id;
+    }
+
+
+    // --------------------------------------------------------
+    // Optional internal auth
+    // --------------------------------------------------------
+
+    const headers = {};
+
+    if (
+      process.env.ML_SERVICE_TOKEN
+    ) {
+
+      headers[
+        'X-ML-Service-Token'
+      ] =
+        process.env.ML_SERVICE_TOKEN;
+    }
+
+
+    // --------------------------------------------------------
+    // Call Python ensemble
+    // --------------------------------------------------------
+
+    const mlData =
+      await callMLService(
+        '/analyze/news',
+        payload,
+        {
+          timeout:
+            90000,
+
+          headers
+        }
+      );
+
+
+    // --------------------------------------------------------
+    // Return exactly what Python generated
+    // --------------------------------------------------------
+
+    return res.status(
+      200
+    ).json(
+      mlData
+    );
+
 
   } catch (error) {
-    console.error('Error in analyzeNews:', error);
-    return res.status(500).json({
-      error: { message: 'Internal server error occurred while analyzing the news article.' }
+
+    console.error(
+      'Error in analyzeNews:',
+      error
+    );
+
+
+    // --------------------------------------------------------
+    // Timeout
+    // --------------------------------------------------------
+
+    if (
+      error.name ===
+      'AbortError'
+    ) {
+
+      return res.status(
+        504
+      ).json({
+
+        error: {
+          message:
+            'News analysis timed out. Please try again.'
+        }
+
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // Python service error
+    // --------------------------------------------------------
+
+    if (
+      error.status
+    ) {
+
+      return res.status(
+        error.status >= 400 &&
+        error.status < 600
+          ? error.status
+          : 502
+      ).json({
+
+        error: {
+          message:
+            error.message
+        }
+
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // Service unavailable
+    // --------------------------------------------------------
+
+    return res.status(
+      503
+    ).json({
+
+      error: {
+        message:
+          'TrustGuard ML service is unavailable.'
+      }
+
     });
   }
 };
 
+
+// ============================================================
+// REVIEW
+// ============================================================
+
 /**
- * 2. POST /api/v1/analyze/review
- * Payload: { text: string }
+ * POST /api/v1/analyze/review
+ *
+ * Payload:
+ *
+ * {
+ *   "text": "This product is amazing..."
+ * }
  */
-export const analyzeReview = async (req, res) => {
+export const analyzeReview = async (
+  req,
+  res
+) => {
+
   try {
-    const { text } = req.body;
 
-    if (!text || typeof text !== 'string' || text.trim().length < 10) {
-      return res.status(400).json({
-        error: { message: 'Review text must be at least 10 characters long.' }
+    const {
+      text
+    } = req.body || {};
+
+
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
+    if (
+      typeof text !== 'string' ||
+      text.trim().length < 10
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Review text must be at least 10 characters long.'
+        }
+
       });
     }
 
-    // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
-    // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
-    
-    try {
-      const mlServiceUrl = process.env.PYTHON_ML_SERVICE_URL || 'http://127.0.0.1:8000';
-      const response = await fetch(`${mlServiceUrl}/analyze/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      });
-      if (response.ok) {
-        const mlData = await response.json();
-        return res.status(200).json(mlData);
-      }
-    } catch (mlErr) {
-      console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
+
+    // --------------------------------------------------------
+    // Call Python
+    // --------------------------------------------------------
+
+    const headers = {};
+
+    if (
+      process.env.ML_SERVICE_TOKEN
+    ) {
+
+      headers[
+        'X-ML-Service-Token'
+      ] =
+        process.env.ML_SERVICE_TOKEN;
     }
 
-    // Demo/Fallback Processing Logic
-    const cleanedText = text.toLowerCase();
-    
-    // Fake reviews often show extreme positivity, repetitive phrases, and low informational value
-    const spamIndicators = ['buy this now', 'free gift', 'make money', 'best product ever', 'click here', 'guaranteed success', 'life changing', 'amazing amazing'];
-    const matchesSpam = spamIndicators.filter(word => cleanedText.includes(word));
-    
-    let label = 'Genuine';
-    let confidence = 89.1;
-    let badgeClass = 'success';
-    let spamScore = 15;
 
-    if (matchesSpam.length > 0 || cleanedText.match(/(.)\1{4,}/g)) { // Check for character repetition
-      label = 'Fake';
-      confidence = 82.5 + (matchesSpam.length * 4) > 99.0 ? 99.0 : 82.5 + (matchesSpam.length * 4);
-      badgeClass = 'danger';
-      spamScore = 75 + (matchesSpam.length * 5);
-    } else {
-      confidence = (80 + (text.length % 19)).toFixed(1);
-      spamScore = (5 + (text.length % 15)).toFixed(1);
-    }
+    const mlData =
+      await callMLService(
+        '/analyze/review',
+        {
+          text:
+            text.trim()
+        },
+        {
+          timeout:
+            60000,
 
-    return res.status(200).json({
-      success: true,
-      label,
-      confidence: parseFloat(confidence),
-      badgeClass,
-      metrics: {
-        spamScore: parseFloat(spamScore),
-        readabilityIndex: 82.3
-      },
-      explanation: label === 'Fake'
-        ? `Review flagged as potentially fake due to hyperbolic language or matching spam sequences (${matchesSpam.join(', ') || 'repetitive characters'}).`
-        : 'The review structure displays authentic feedback characteristics, objective details, and normal syntax variance.'
-    });
+          headers
+        }
+      );
+
+
+    // --------------------------------------------------------
+    // Return ensemble result
+    // --------------------------------------------------------
+
+    return res.status(
+      200
+    ).json(
+      mlData
+    );
+
 
   } catch (error) {
-    console.error('Error in analyzeReview:', error);
-    return res.status(500).json({
-      error: { message: 'Internal server error occurred while analyzing the product review.' }
+
+    console.error(
+      'Error in analyzeReview:',
+      error
+    );
+
+
+    if (
+      error.name ===
+      'AbortError'
+    ) {
+
+      return res.status(
+        504
+      ).json({
+
+        error: {
+          message:
+            'Review analysis timed out.'
+        }
+
+      });
+    }
+
+
+    if (
+      error.status
+    ) {
+
+      return res.status(
+        error.status >= 400 &&
+        error.status < 600
+          ? error.status
+          : 502
+      ).json({
+
+        error: {
+          message:
+            error.message
+        }
+
+      });
+    }
+
+
+    return res.status(
+      503
+    ).json({
+
+      error: {
+        message:
+          'TrustGuard ML service is unavailable.'
+      }
+
     });
   }
 };
 
+
+// ============================================================
+// PHISHING
+// ============================================================
+
 /**
- * 3. POST /api/v1/analyze/phishing
- * Payload: { url: string }
+ * POST /api/v1/analyze/phishing
+ *
+ * Payload:
+ *
+ * {
+ *   "url": "https://example.com"
+ * }
  */
-export const analyzePhishing = async (req, res) => {
+export const analyzePhishing = async (
+  req,
+  res
+) => {
+
   try {
-    const { url } = req.body;
 
-    if (!url || typeof url !== 'string' || !/^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*\/?$/.test(url)) {
-      return res.status(400).json({
-        error: { message: 'A valid URL is required.' }
+    const {
+      url
+    } = req.body || {};
+
+
+    // --------------------------------------------------------
+    // Validate URL
+    // --------------------------------------------------------
+
+    if (
+      typeof url !== 'string' ||
+      !url.trim()
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'A URL is required.'
+        }
+
       });
     }
 
-    // HOOK FOR DOWNSTREAM PYTHON ML SERVICE INTEGRATION:
-    // To connect your ML microservice, uncomment the block below and adjust endpoint/payload mapping.
-    
+
+    const normalizedUrl =
+      url.trim();
+
+
+    // --------------------------------------------------------
+    // More reliable URL validation
+    //
+    // Do NOT use the old regex.
+    // It rejects many legitimate URLs and can behave badly
+    // with complex URLs.
+    // --------------------------------------------------------
+
+    let parsedUrl;
+
     try {
-      const mlServiceUrl = process.env.PYTHON_ML_SERVICE_URL || 'http://127.0.0.1:8000';
-      const response = await fetch(`${mlServiceUrl}/analyze/phishing`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+
+      const candidate =
+        normalizedUrl.match(
+          /^https?:\/\//i
+        )
+          ? normalizedUrl
+          : `https://${normalizedUrl}`;
+
+      parsedUrl =
+        new URL(
+          candidate
+        );
+
+    } catch {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'A valid HTTP or HTTPS URL is required.'
+        }
+
       });
-      if (response.ok) {
-        const mlData = await response.json();
-        return res.status(200).json(mlData);
-      }
-    } catch (mlErr) {
-      console.warn('Downstream ML service fetch failed, falling back to gateway demo processor:', mlErr.message);
     }
 
-    // Demo/Fallback Processing Logic
-    const lowerUrl = url.toLowerCase();
-    
-    let isPhishing = false;
-    let riskLevel = 'Low';
-    let sslValid = true;
-    let domainAge = '4 Years, 2 Months';
-    let tldTrust = 'High';
-    let specialCharCount = (url.match(/[^a-zA-Z0-9]/g) || []).length;
-    let confidence = 94.2;
 
-    // Checks:
-    // 1. SSL protocol check
-    if (url.startsWith('http://')) {
-      sslValid = false;
-      isPhishing = true;
-      riskLevel = 'Medium';
+    if (
+      ![
+        'http:',
+        'https:'
+      ].includes(
+        parsedUrl.protocol
+      )
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Only HTTP and HTTPS URLs are supported.'
+        }
+
+      });
     }
 
-    // 2. Suspicious keywords in domain
-    const suspiciousKeywords = ['login', 'signin', 'verify', 'update-account', 'secure-bank', 'paypal', 'netflix-secure', 'wallet', 'crypto'];
-    const matchedKeywords = suspiciousKeywords.filter(keyword => lowerUrl.includes(keyword));
-    if (matchedKeywords.length > 0) {
-      isPhishing = true;
-      riskLevel = 'High';
+
+    // --------------------------------------------------------
+    // Call Python phishing ensemble
+    // --------------------------------------------------------
+
+    const headers = {};
+
+    if (
+      process.env.ML_SERVICE_TOKEN
+    ) {
+
+      headers[
+        'X-ML-Service-Token'
+      ] =
+        process.env.ML_SERVICE_TOKEN;
     }
 
-    // 3. Shady TLDs
-    const shadyTlds = ['.xyz', '.info', '.top', '.click', '.date', '.win', '.party', '.cc'];
-    const matchedTld = shadyTlds.find(tld => lowerUrl.endsWith(tld) || lowerUrl.includes(tld + '/'));
-    if (matchedTld) {
-      isPhishing = true;
-      tldTrust = 'Low';
-      if (riskLevel === 'Low') riskLevel = 'Medium';
-    }
 
-    // Adjust metrics for phishing vs safe
-    let label = 'Safe';
-    let badgeClass = 'success';
+    const mlData =
+      await callMLService(
+        '/analyze/phishing',
+        {
+          url:
+            parsedUrl.toString()
+        },
+        {
+          timeout:
+            60000,
 
-    if (isPhishing) {
-      label = 'Phishing';
-      badgeClass = 'danger';
-      confidence = 80 + (specialCharCount * 2) > 99.9 ? 99.9 : 80 + (specialCharCount * 2);
-      domainAge = '3 Days (Newly Registered)';
-    } else {
-      confidence = 90 + (url.length % 9);
-    }
+          headers
+        }
+      );
 
-    return res.status(200).json({
-      success: true,
-      label,
-      confidence: parseFloat(confidence),
-      badgeClass,
-      riskLevel,
-      metrics: {
-        sslValid,
-        domainAge,
-        tldTrust,
-        specialCharCount
-      },
-      explanation: label === 'Phishing'
-        ? `Threat profile detected with ${riskLevel} Risk. Indicators: ${sslValid ? 'HTTPS Active but suspicious' : 'No HTTP SSL (insecure)'}, TLD Trust: ${tldTrust}, domain keywords match: [${matchedKeywords.join(', ') || 'none'}], structure contains ${specialCharCount} delimiters/symbols.`
-        : `Verified URL. Low-risk domain signature matching authenticated index records. SSL is active & valid.`
-    });
+
+    // --------------------------------------------------------
+    // Return ensemble result
+    // --------------------------------------------------------
+
+    return res.status(
+      200
+    ).json(
+      mlData
+    );
+
 
   } catch (error) {
-    console.error('Error in analyzePhishing:', error);
-    return res.status(500).json({
-      error: { message: 'Internal server error occurred while checking the URL.' }
+
+    console.error(
+      'Error in analyzePhishing:',
+      error
+    );
+
+
+    if (
+      error.name ===
+      'AbortError'
+    ) {
+
+      return res.status(
+        504
+      ).json({
+
+        error: {
+          message:
+            'Phishing analysis timed out.'
+        }
+
+      });
+    }
+
+
+    if (
+      error.status
+    ) {
+
+      return res.status(
+        error.status >= 400 &&
+        error.status < 600
+          ? error.status
+          : 502
+      ).json({
+
+        error: {
+          message:
+            error.message
+        }
+
+      });
+    }
+
+
+    return res.status(
+      503
+    ).json({
+
+      error: {
+        message:
+          'TrustGuard ML service is unavailable.'
+      }
+
+    });
+  }
+};
+
+
+// ============================================================
+// NEWS TRANSLATION
+// ============================================================
+
+/**
+ * POST /api/v1/analyze/news/translate
+ *
+ * Payload:
+ *
+ * {
+ *   "text": "...",
+ *   "language": "Hindi"
+ * }
+ */
+export const translateNews = async (
+  req,
+  res
+) => {
+
+  try {
+
+    const {
+      text,
+      language
+    } = req.body || {};
+
+
+    if (
+      typeof text !== 'string' ||
+      text.trim().length < 1
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Text is required.'
+        }
+
+      });
+    }
+
+
+    if (
+      typeof language !== 'string' ||
+      !language.trim()
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Target language is required.'
+        }
+
+      });
+    }
+
+
+    const headers = {};
+
+    if (
+      process.env.ML_SERVICE_TOKEN
+    ) {
+
+      headers[
+        'X-ML-Service-Token'
+      ] =
+        process.env.ML_SERVICE_TOKEN;
+    }
+
+
+    const mlData =
+      await callMLService(
+        '/analyze/news/translate',
+        {
+          text:
+            text.trim(),
+
+          language:
+            language.trim()
+        },
+        {
+          timeout:
+            90000,
+
+          headers
+        }
+      );
+
+
+    return res.status(
+      200
+    ).json(
+      mlData
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      'Error in translateNews:',
+      error
+    );
+
+
+    return res.status(
+      error.status || 503
+    ).json({
+
+      error: {
+        message:
+          error.message ||
+          'Translation service unavailable.'
+      }
+
+    });
+  }
+};
+
+
+// ============================================================
+// NEWS SUMMARY
+// ============================================================
+
+/**
+ * POST /api/v1/analyze/news/summary
+ *
+ * Payload:
+ *
+ * {
+ *   "text": "...",
+ *   "language": "English"
+ * }
+ */
+export const summarizeNews = async (
+  req,
+  res
+) => {
+
+  try {
+
+    const {
+      text,
+      language = 'English'
+    } = req.body || {};
+
+
+    if (
+      typeof text !== 'string' ||
+      !text.trim()
+    ) {
+
+      return res.status(
+        400
+      ).json({
+
+        error: {
+          message:
+            'Text is required.'
+        }
+
+      });
+    }
+
+
+    const headers = {};
+
+    if (
+      process.env.ML_SERVICE_TOKEN
+    ) {
+
+      headers[
+        'X-ML-Service-Token'
+      ] =
+        process.env.ML_SERVICE_TOKEN;
+    }
+
+
+    const mlData =
+      await callMLService(
+        '/analyze/news/summary',
+        {
+          text:
+            text.trim(),
+
+          language:
+            typeof language === 'string'
+              ? language.trim()
+              : 'English'
+        },
+        {
+          timeout:
+            90000,
+
+          headers
+        }
+      );
+
+
+    return res.status(
+      200
+    ).json(
+      mlData
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      'Error in summarizeNews:',
+      error
+    );
+
+
+    return res.status(
+      error.status || 503
+    ).json({
+
+      error: {
+        message:
+          error.message ||
+          'Summary service unavailable.'
+      }
+
+    });
+  }
+};
+
+
+// ============================================================
+// HEALTH CHECK
+// ============================================================
+
+/**
+ * GET /api/v1/analyze/health
+ */
+export const analysisHealth = async (
+  req,
+  res
+) => {
+
+  try {
+
+    const mlServiceUrl =
+      getMLServiceUrl();
+
+    const response =
+      await fetch(
+        `${mlServiceUrl}/health`,
+        {
+          method: 'GET',
+          signal:
+            AbortSignal.timeout(
+              5000
+            )
+        }
+      );
+
+    const data =
+      await response.json();
+
+    return res.status(
+      response.ok
+        ? 200
+        : 503
+    ).json({
+
+      success:
+        response.ok,
+
+      gateway:
+        'online',
+
+      mlService:
+        data
+    });
+
+
+  } catch (error) {
+
+    return res.status(
+      503
+    ).json({
+
+      success:
+        false,
+
+      gateway:
+        'online',
+
+      mlService: {
+        status:
+          'offline'
+      },
+
+      error: {
+        message:
+          'Python ML service is unavailable.'
+      }
     });
   }
 };
