@@ -52,12 +52,21 @@ function App() {
 
   return (
     <div className="d-flex flex-column min-vh-100">
+      {/* Ambient background layers */}
+      <div className="ambient-bg">
+        <div className="ambient-glow-1"></div>
+        <div className="ambient-glow-2"></div>
+        <div className="ambient-glow-3"></div>
+      </div>
+      <div className="grid-overlay"></div>
+      <div className="noise-overlay"></div>
+
       {/* Brand Header */}
       <Navbar />
 
       <main className="container flex-grow-1 py-4">
         <div className="text-center mb-5">
-          <h2 className="display-5 fw-extrabold text-white tracking-tight mb-2">
+          <h2 className="display-5 fw-extrabold text-white sheen-text tracking-tight mb-2">
             Verifiable Digital Intelligence
           </h2>
           <p className="lead text-secondary mx-auto" style={{ maxWidth: '600px', fontSize: '1.1rem' }}>
@@ -71,16 +80,18 @@ function App() {
         {/* Content Panel */}
         <div className="row justify-content-center">
           <div className="col-lg-8">
-            <div className="glass-card p-4 p-md-5 border-light-subtle shadow-lg">
-              {activeTab === 'news' && (
-                <NewsInput onSubmit={handleAnalysisSubmit} loading={loading} />
-              )}
-              {activeTab === 'review' && (
-                <ReviewInput onSubmit={handleAnalysisSubmit} loading={loading} />
-              )}
-              {activeTab === 'phishing' && (
-                <PhishingInput onSubmit={handleAnalysisSubmit} loading={loading} />
-              )}
+            <div className="conic-border-wrapper shadow-lg">
+              <div className="conic-border-content glass-card p-4 p-md-5 border-0">
+                {activeTab === 'news' && (
+                  <NewsInput onSubmit={handleAnalysisSubmit} loading={loading} />
+                )}
+                {activeTab === 'review' && (
+                  <ReviewInput onSubmit={handleAnalysisSubmit} loading={loading} />
+                )}
+                {activeTab === 'phishing' && (
+                  <PhishingInput onSubmit={handleAnalysisSubmit} loading={loading} />
+                )}
+              </div>
             </div>
 
             {/* Status alerts */}

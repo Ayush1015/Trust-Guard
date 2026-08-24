@@ -7,18 +7,17 @@ export default function TabNavigation({ activeTab, setActiveTab }) {
   ];
 
   return (
-    <ul className="nav nav-pills justify-content-center gap-2 p-2 mb-4 glass-card" style={{ maxWidth: '650px', margin: '0 auto' }}>
+    <div className="segmented-control mb-5">
       {tabs.map((tab) => (
-        <li className="nav-item flex-grow-1" key={tab.id}>
-          <button
-            className={`nav-link w-100 py-3 text-center ${activeTab === tab.id ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.id)}
-            type="button"
-          >
-            {tab.label}
-          </button>
-        </li>
+        <button
+          key={tab.id}
+          className={`segmented-control-btn ${activeTab === tab.id ? 'active' : ''}`}
+          onClick={() => setActiveTab(tab.id)}
+          type="button"
+        >
+          {tab.label}
+        </button>
       ))}
-    </ul>
+    </div>
   );
 }

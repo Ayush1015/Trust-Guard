@@ -6,15 +6,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# CORS middleware config
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 # Global variables for models and vectorizers
@@ -30,6 +21,15 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="TrustGuard ML Inference Service", lifespan=lifespan)
+
+# CORS middleware config
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def load_models():
     global news_model, news_vectorizer, review_model, review_vectorizer, phishing_model
