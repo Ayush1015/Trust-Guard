@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 import joblib
 import numpy as np
 import requests
+import difflib
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -38,8 +39,8 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------
-
 BASE_DIR = Path(__file__).resolve().parent
+
 def load_env_file_safely(path: Path) -> None:
     """
     Load simple KEY=VALUE .env entries without python-dotenv's parser.
@@ -282,6 +283,39 @@ def validate_public_url(url: str):
 # ---------------------------------------------------------------------
 # MODEL LOADING
 # ---------------------------------------------------------------------
+POPULAR_DOMAINS = ["google.com","paypal.com","amazon.com","microsoft.com","apple.com",
+                    "facebook.com","netflix.com","bankofamerica.com","chase.com","irs.gov"]
+
+def typosquat_check(hostname: str):
+    for domain in POPULAR_DOMAINS:
+        ratio = difflib.SequenceMatcher(None, hostname, domain).ratio()
+        if 0.75 <= ratio < 1.0:   # similar but not identical = likely typosquat
+            return domain
+    return None
+
+def redirect_chain_check(url: str):
+    try:
+        resp = requests.head(url, timeout=8, allow_redirects=True)
+        hops = len(resp.history)
+        final_host = urlparse(resp.url).hostname
+        return {"hops": hops, "final_host": final_host, "suspicious": hops >= 3}
+    except Exception:
+        return {"hops": 0, "final_host": None, "suspicious": False}
+
+def heuristic_phishing_vote(url: str, data: dict):
+    hostname = data["hostname"]
+    typosquat_target = typosquat_check(hostname)
+    redirects = redirect_chain_check(url)
+
+    red_flags = 0
+    if typosquat_target: red_flags += 2
+    if redirects["suspicious"]: red_flags += 1
+    if not data["ssl"]: red_flags += 1
+    if data["shady_tld"]: red_flags += 1
+
+    label = "Phishing" if red_flags >= 2 else "Safe"
+    return make_prediction("Standard Checklist (typosquat/redirect/SSL/TLD)", label, 0.6,
+                            source="heuristic", weight=0.75), typosquat_target, redirects
 
 def record_error(message: str):
     MODEL_ERRORS.append(message)
@@ -1162,7 +1196,28 @@ def pretrained_phishing_predictions(url: str):
         if result:
             results.append(result)
     return results
+# --- add to main.py, near the other prediction helpers ---
 
+def heuristic_news_vote(headline: str, text: str):
+    """Cheap stylometric heuristic — always available, zero dependencies."""
+    content = f"{headline} {text}".lower()
+    clickbait_markers = ["you won't believe", "shocking", "!!!", "miracle cure",
+                          "doctors hate", "secret they don't want", "click here"]
+    score = sum(1 for m in clickbait_markers if m in content)
+    excess_caps = sum(1 for w in content.split() if w.isupper() and len(w) > 3)
+    if score >= 2 or excess_caps > 5:
+        return make_prediction("Heuristic Style Check", "Fake", 0.55, source="heuristic", weight=0.5)
+    return make_prediction("Heuristic Style Check", "Real", 0.55, source="heuristic", weight=0.5)
+
+def heuristic_review_vote(text: str):
+    content = text.lower()
+    spam_markers = ["best product ever", "5 stars!!!", "buy now", "highly recommend!!!",
+                     "changed my life", "verified purchase" ]
+    exclam = content.count("!")
+    superlatives = sum(1 for w in ["amazing", "perfect", "incredible", "best ever"] if w in content)
+    if exclam >= 4 or superlatives >= 2:
+        return make_prediction("Heuristic Spam Pattern", "Fake", 0.5, source="heuristic", weight=0.5)
+    return make_prediction("Heuristic Spam Pattern", "Genuine", 0.5, source="heuristic", weight=0.5)
 # ---------------------------------------------------------------------
 # BERTPHISH
 # ---------------------------------------------------------------------
@@ -1419,7 +1474,18 @@ def extract_grounding_sources(response: Any) -> list[dict[str, str]]:
         logger.debug("Grounding source extraction failed: %s", exc)
 
     return sources[:15]
-
+def duckduckgo_related(query: str, limit=5):
+    try:
+        resp = requests.get("https://html.duckduckgo.com/html/",
+                             params={"q": query}, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for a in soup.select(".result__a")[:limit]:
+            results.append({"title": a.get_text(strip=True), "url": a.get("href")})
+        return results
+    except Exception:
+        return []
 def gemini_news_check(
     headline: str,
     article_url: str,
@@ -1611,7 +1677,8 @@ def analyze_news(
         )
 
     predictions = []
-
+    predictions.append(heuristic_news_vote(headline, article_text))   
+              
     local = local_news_prediction(content)
     if local:
         predictions.append(local)
@@ -1692,7 +1759,7 @@ def analyze_review(payload: TextPayload):
         )
 
     predictions = []
-
+    predictions.append(heuristic_review_vote(content))                
     local = local_review_prediction(content)
     if local:
         predictions.append(local)
@@ -1766,6 +1833,9 @@ def analyze_phishing(payload: UrlPayload):
     poll = model_poll(predictions, "Phishing")
     winner = poll["winner"]
     data = url_feature_data(url)
+    
+    heuristic_vote, typosquat_target, redirects = heuristic_phishing_vote(url, data)
+    predictions.append(heuristic_vote)
 
     if winner == "Phishing":
         risk = (
@@ -1828,6 +1898,11 @@ def analyze_phishing(payload: UrlPayload):
         "poll": poll,
         "models": predictions,
         "url": url,
+        "standardChecklist": {
+        "typosquattingOf": typosquat_target,
+        "redirectHops": redirects["hops"],
+        "finalDestination": redirects["final_host"],
+        },
     }
 
 @app.post("/analyze/news/translate")
@@ -1950,3 +2025,4 @@ if __name__ == "__main__":
         port=PORT,
         reload=RELOAD,
     )
+    

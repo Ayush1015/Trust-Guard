@@ -22,6 +22,8 @@
 // ============================================================
 // HELPERS
 // ============================================================
+import db from '../db/index.js';
+// ...inside analyzeNews, right before `return res.status(200).json(mlData);`
 
 const getMLServiceUrl = () => {
   return (
@@ -370,7 +372,14 @@ export const analyzeNews = async (
       error
     );
 
-
+    // in analyzeController.js, after getting mlData for /analyze/news:
+    if (req.userId) {
+        const user = db.prepare('SELECT preferred_language FROM users WHERE id = ?').get(req.userId);
+        if (user?.preferred_language && user.preferred_language !== 'English') {
+          mlData.autoSummary = await callMLService('/analyze/news/summary',
+            { text: articleText || finalHeadline, language: user.preferred_language }, { timeout: 30000 });
+  }
+}
     // --------------------------------------------------------
     // Timeout
     // --------------------------------------------------------
@@ -420,7 +429,11 @@ export const analyzeNews = async (
     // --------------------------------------------------------
     // Service unavailable
     // --------------------------------------------------------
-
+    if (req.userId) {
+      db.prepare(
+    'INSERT INTO analysis_history (user_id, type, input_summary, result_label, confidence, raw_result) VALUES (?, ?, ?, ?, ?, ?)'
+       ).run(req.userId, 'news', finalHeadline.slice(0, 200), mlData.label, mlData.confidence, JSON.stringify(mlData));
+    }
     return res.status(
       503
     ).json({

@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "TrustGuard",
+  "version": "1.0.0",
+  "description": "Check news, reviews, and links for trust signals as you browse.",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": ["http://localhost:5000/*", "https://your-deployed-api.example.com/*"],
+  "action": { "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{ "matches": ["<all_urls>"], "js": ["content.js"] }]
+}
