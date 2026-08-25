@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import Navbar from "./components/Navbar";
+import AuthModal from "./components/AuthModal";
 import TabNavigation from "./components/TabNavigation";
 import NewsInput from "./components/NewsInput";
 import ReviewInput from "./components/ReviewInput";
@@ -26,15 +27,21 @@ const GEMINI_CONNECT_URL =
   import.meta.env.VITE_GEMINI_CONNECT_URL ||
   "https://aistudio.google.com/apikey";
 
+const THEME_STORAGE_KEY = "trustguard:theme";
+const AUTH_STORAGE_KEY = "trustguard:user";
+
+// All colors resolve through CSS custom properties so every
+// inline-styled element here repaints instantly when the
+// person switches between light and dark theme.
 const UI = {
-  cyan: "#22d3ee",
-  cyanSoft: "rgba(34,211,238,.10)",
-  cyanBorder: "rgba(34,211,238,.22)",
-  text: "#f8fafc",
-  muted: "#a8b4c7",
-  subtle: "#748198",
-  card: "rgba(10,18,32,.72)",
-  cardBorder: "rgba(148,163,184,.14)",
+  cyan: "var(--accent-cyan)",
+  cyanSoft: "var(--accent-cyan-soft)",
+  cyanBorder: "var(--accent-cyan-border)",
+  text: "var(--text-primary)",
+  muted: "var(--text-secondary)",
+  subtle: "var(--text-muted)",
+  card: "var(--bg-card)",
+  cardBorder: "var(--border-color)",
 };
 
 function clean(value) {
@@ -126,24 +133,24 @@ function ToneBadge({ children, tone = "info" }) {
       border: UI.cyanBorder,
     },
     success: {
-      color: "#4ade80",
-      background: "rgba(74,222,128,.10)",
-      border: "rgba(74,222,128,.22)",
+      color: "var(--success)",
+      background: "var(--success-glow)",
+      border: "color-mix(in srgb, var(--success) 35%, transparent)",
     },
     danger: {
-      color: "#fb7185",
-      background: "rgba(251,113,133,.10)",
-      border: "rgba(251,113,133,.22)",
+      color: "var(--danger)",
+      background: "var(--danger-glow)",
+      border: "color-mix(in srgb, var(--danger) 35%, transparent)",
     },
     warning: {
-      color: "#fbbf24",
-      background: "rgba(251,191,36,.10)",
-      border: "rgba(251,191,36,.22)",
+      color: "var(--warning)",
+      background: "var(--warning-glow)",
+      border: "color-mix(in srgb, var(--warning) 35%, transparent)",
     },
     neutral: {
-      color: "#cbd5e1",
-      background: "rgba(148,163,184,.09)",
-      border: "rgba(148,163,184,.16)",
+      color: "var(--text-secondary)",
+      background: "var(--bg-elevated)",
+      border: "var(--border-color)",
     },
   };
 
@@ -172,7 +179,7 @@ function SectionCard({ icon, title, subtitle, children, className = "" }) {
         background: UI.card,
         border: `1px solid ${UI.cardBorder}`,
         borderRadius: 18,
-        boxShadow: "0 18px 55px rgba(0,0,0,.16)",
+        boxShadow: "var(--shadow-soft)",
       }}
     >
       <div className="p-4 p-md-4">
@@ -194,7 +201,7 @@ function SectionCard({ icon, title, subtitle, children, className = "" }) {
 
             <div className="min-w-0">
               {title && (
-                <h5 className="text-white fw-semibold mb-1">{title}</h5>
+                <h5 className="fw-semibold mb-1" style={{ color: UI.text }}>{title}</h5>
               )}
               {subtitle && (
                 <div
@@ -324,6 +331,52 @@ function App() {
     models: null,
   });
   const [lastPayload, setLastPayload] = useState(null);
+
+  // ---------------------------------------------------------
+  // Theme (persisted, defaults to the visitor's OS preference)
+  // ---------------------------------------------------------
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "dark";
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia?.("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  }, []);
+
+  // ---------------------------------------------------------
+  // Auth (client-side UI only; wire up to real auth when ready)
+  // ---------------------------------------------------------
+  const [authModalMode, setAuthModalMode] = useState(null); // null | "login" | "signup"
+  const [user, setUser] = useState(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = window.localStorage.getItem(AUTH_STORAGE_KEY);
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const handleAuthenticated = useCallback((nextUser) => {
+    setUser(nextUser);
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
+    setAuthModalMode(null);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    setUser(null);
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  }, []);
 
   // Gemini is intentionally kept in memory only.
   const [geminiApiKey, setGeminiApiKey] = useState("");
@@ -538,13 +591,25 @@ function App() {
   return (
     <div
       className="d-flex flex-column min-vh-100"
-      style={{
-        background:
-          "radial-gradient(circle at 50% -10%, rgba(34,211,238,.08), transparent 34%), #050b14",
-        color: UI.text,
-      }}
+      style={{ color: UI.text }}
     >
-      <Navbar />
+      <Navbar
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onOpenAuth={setAuthModalMode}
+        isAuthenticated={Boolean(user)}
+        user={user}
+        onLogout={handleLogout}
+        backendStatus={backend.status}
+      />
+
+      {authModalMode && (
+        <AuthModal
+          mode={authModalMode}
+          onClose={() => setAuthModalMode(null)}
+          onAuthenticated={handleAuthenticated}
+        />
+      )}
 
       <main className="container flex-grow-1 py-4 py-lg-5">
         {/* HERO */}
@@ -565,18 +630,18 @@ function App() {
                 height: 7,
                 background:
                   backend.status === "online"
-                    ? "#4ade80"
+                    ? "var(--success)"
                     : backend.status === "checking"
-                      ? "#fbbf24"
-                      : "#fb7185",
+                      ? "var(--warning)"
+                      : "var(--danger)",
               }}
             />
             {statusLabel}
           </ToneBadge>
 
           <h1
-            className="display-5 fw-bold text-white mt-3 mb-2"
-            style={{ letterSpacing: "-.025em" }}
+            className="display-5 fw-bold mt-3 mb-2"
+            style={{ letterSpacing: "-.025em", color: UI.text }}
           >
             Verifiable Digital Intelligence
           </h1>
@@ -590,6 +655,7 @@ function App() {
               lineHeight: 1.7,
             }}
           >
+            {user ? `Welcome back, ${user.name}. ` : ""}
             Detect misinformation, fake reviews and phishing URLs
             with compatible ML models, ensemble voting and optional
             Gemini web verification.
@@ -673,7 +739,8 @@ function App() {
               <div className="col-lg-8">
                 <label
                   htmlFor="gemini-key"
-                  className="form-label small fw-semibold text-white"
+                  className="form-label small fw-semibold"
+                  style={{ color: UI.text }}
                 >
                   Gemini API key
                 </label>
@@ -686,7 +753,7 @@ function App() {
                         ? "text"
                         : "password"
                     }
-                    className="form-control bg-dark text-white border-secondary"
+                    className="form-control form-control-custom"
                     placeholder="Paste your Gemini API key"
                     value={geminiApiKey}
                     onChange={(event) =>
@@ -756,7 +823,8 @@ function App() {
                 href={GEMINI_CONNECT_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="small text-info text-decoration-none"
+                className="small text-decoration-none"
+                style={{ color: UI.cyan }}
               >
                 Get a Gemini API key
                 <i className="bi bi-box-arrow-up-right ms-1" />
@@ -848,7 +916,7 @@ function App() {
               </div>
 
               <div className="flex-grow-1">
-                <div className="fw-semibold text-white">
+                <div className="fw-semibold" style={{ color: UI.text }}>
                   Running TrustGuard analysis
                 </div>
                 <div
@@ -876,7 +944,7 @@ function App() {
               className="progress mt-3"
               style={{
                 height: 4,
-                background: "rgba(255,255,255,.06)",
+                background: "var(--bg-elevated)",
               }}
             >
               <div
@@ -947,14 +1015,12 @@ function App() {
                         <div
                           className="p-3 rounded-3 h-100"
                           style={{
-                            background:
-                              "rgba(255,255,255,.025)",
-                            border:
-                              "1px solid rgba(255,255,255,.08)",
+                            background: "var(--bg-elevated)",
+                            border: `1px solid ${UI.cardBorder}`,
                           }}
                         >
                           <div className="d-flex justify-content-between align-items-center">
-                            <span className="text-white fw-semibold">
+                            <span className="fw-semibold" style={{ color: UI.text }}>
                               {label}
                             </span>
                             <ToneBadge
@@ -973,8 +1039,7 @@ function App() {
                 <div
                   className="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-4 pt-3"
                   style={{
-                    borderTop:
-                      "1px solid rgba(255,255,255,.08)",
+                    borderTop: `1px solid ${UI.cardBorder}`,
                   }}
                 >
                   <div>
@@ -984,7 +1049,7 @@ function App() {
                     >
                       Final winner
                     </span>
-                    <div className="text-white fw-bold fs-5">
+                    <div className="fw-bold fs-5" style={{ color: UI.text }}>
                       {result.poll.winner || "Unknown"}
                     </div>
                   </div>
@@ -996,7 +1061,7 @@ function App() {
                     >
                       Vote confidence
                     </span>
-                    <div className="text-info fw-bold fs-5">
+                    <div className="fw-bold fs-5" style={{ color: UI.cyan }}>
                       {result.poll.confidence ?? "N/A"}
                       {result.poll.confidence != null
                         ? "%"
@@ -1023,23 +1088,27 @@ function App() {
                         "--bs-table-bg":
                           "transparent",
                         "--bs-table-border-color":
-                          "rgba(255,255,255,.07)",
+                          "var(--border-color)",
+                        color: UI.text,
                       }}
                     >
                       <thead>
                         <tr>
                           <th
-                            className="text-secondary small"
+                            className="small"
+                            style={{ color: UI.muted }}
                           >
                             MODEL
                           </th>
                           <th
-                            className="text-secondary small"
+                            className="small"
+                            style={{ color: UI.muted }}
                           >
                             VOTE
                           </th>
                           <th
-                            className="text-secondary small"
+                            className="small"
+                            style={{ color: UI.muted }}
                           >
                             CONFIDENCE
                           </th>
@@ -1055,7 +1124,7 @@ function App() {
                                 `${index}`
                               }
                             >
-                              <td className="text-white fw-medium">
+                              <td className="fw-medium" style={{ color: UI.text }}>
                                 {model.model}
                               </td>
 
@@ -1179,13 +1248,11 @@ function App() {
                           <div
                             className="p-3 rounded-3 d-flex align-items-start gap-3"
                             style={{
-                              background:
-                                "rgba(255,255,255,.025)",
-                              border:
-                                "1px solid rgba(255,255,255,.07)",
+                              background: "var(--bg-elevated)",
+                              border: `1px solid ${UI.cardBorder}`,
                             }}
                           >
-                            <span className="text-info fw-bold">
+                            <span className="fw-bold" style={{ color: UI.cyan }}>
                               {index + 1}
                             </span>
 
@@ -1204,7 +1271,7 @@ function App() {
                               </div>
                             </div>
 
-                            <i className="bi bi-box-arrow-up-right ms-auto text-secondary" />
+                            <i className="bi bi-box-arrow-up-right ms-auto" style={{ color: UI.subtle }} />
                           </div>
                         </a>
                       )
@@ -1254,16 +1321,14 @@ function App() {
       <footer
         className="mt-auto py-4"
         style={{
-          borderTop:
-            "1px solid rgba(148,163,184,.10)",
-          background:
-            "rgba(3,8,16,.55)",
+          borderTop: `1px solid ${UI.cardBorder}`,
+          background: "var(--bg-card)",
         }}
       >
         <div className="container">
           <div className="row align-items-center g-3">
             <div className="col-md">
-              <div className="text-white fw-semibold">
+              <div className="fw-semibold" style={{ color: UI.text }}>
                 TrustGuard Digital Forensics
               </div>
               <div
@@ -1289,8 +1354,7 @@ function App() {
             className="small text-center mt-4 pt-3"
             style={{
               color: UI.subtle,
-              borderTop:
-                "1px solid rgba(148,163,184,.08)",
+              borderTop: `1px solid ${UI.cardBorder}`,
             }}
           >
             © 2026 TrustGuard Digital Forensics.
@@ -1312,12 +1376,12 @@ function StatusCard({
 }) {
   return (
     <div
-      className="h-100 p-3"
+      className="h-100 p-3 glass-card"
       style={{
         background: UI.card,
         border: `1px solid ${UI.cardBorder}`,
         borderRadius: 16,
-        boxShadow: "0 12px 35px rgba(0,0,0,.12)",
+        boxShadow: "var(--shadow-soft)",
       }}
     >
       <div className="d-flex align-items-center gap-3">
@@ -1341,7 +1405,7 @@ function StatusCard({
             {title}
           </div>
 
-          <div className="text-white fw-semibold text-truncate mt-1">
+          <div className="fw-semibold text-truncate mt-1" style={{ color: UI.text }}>
             {value}
           </div>
 
@@ -1365,8 +1429,8 @@ function FooterPill({ label }) {
       className="small rounded-pill px-3 py-2"
       style={{
         color: UI.muted,
-        background: "rgba(255,255,255,.035)",
-        border: "1px solid rgba(255,255,255,.07)",
+        background: "var(--bg-elevated)",
+        border: `1px solid ${UI.cardBorder}`,
       }}
     >
       {label}

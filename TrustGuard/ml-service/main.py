@@ -202,7 +202,31 @@ gemini_client: Any = None
 
 MODEL_ERRORS: list[str] = []
 MODEL_LOAD_EVENTS: list[dict[str, Any]] = []
+ENABLE_HF_NEWS_MODELS = os.getenv("ENABLE_HF_NEWS_MODELS", "true").lower() == "true"
 
+# Hugging Face Hub IDs for general-purpose pretrained fake-news classifiers.
+# These are the 4 concrete, loadable repos from the "Worldwide" shortlist —
+# the Kaggle entries are training *datasets*, not inference-ready models,
+# and the remaining India picks (HinFakeNews, Tamil MuRIL, multilingual
+# MuRIL) were named without a public repo ID, so there's nothing to load
+# yet. Add real IDs to HF_NEWS_MODELS (comma-separated) once you have them.
+#
+# IMPORTANT: verify each ID still exists on huggingface.co before relying
+# on it — community repos get renamed, made private, or deleted. Any ID
+# that fails to load is logged and skipped; it never enters the poll.
+DEFAULT_HF_NEWS_MODELS = [
+    "ThomasTschinkel/fake-news-detector",          # RoBERTa-Large
+    "d-mistry013/fake-news-detector",              # RoBERTa-base
+    "dhruvpal/fake-news-bert",                     # DistilBERT (lightweight)
+    "akanbrown/AI-Fake_News_Detection_Roberta",    # RoBERTa, WELFake-based
+]
+
+HF_NEWS_MODEL_IDS = [
+    x.strip()
+    for x in os.getenv("HF_NEWS_MODELS", ",".join(DEFAULT_HF_NEWS_MODELS)).split(",")
+    if x.strip()
+]
+hf_news_classifiers: list[dict[str, Any]] = []
 # ---------------------------------------------------------------------
 # APP
 # ---------------------------------------------------------------------
@@ -767,7 +791,58 @@ def load_bertphish():
             )
 
     logger.info("[BERTPhish] No compatible local model found.")
+def load_hf_news_classifiers():
+    global hf_news_classifiers
+    hf_news_classifiers = []
 
+    if not ENABLE_HF_NEWS_MODELS:
+        logger.info("[HF-NEWS] Disabled by ENABLE_HF_NEWS_MODELS=false")
+        return
+
+    if not HF_NEWS_MODEL_IDS:
+        return
+
+    try:
+        import transformers
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        logger.info("[HF-NEWS] transformers=%s", getattr(transformers, "__version__", "unknown"))
+    except Exception as exc:
+        logger.warning(
+            "[HF-NEWS] transformers unavailable/incompatible: %s. "
+            "Set ENABLE_HF_NEWS_MODELS=false to run without these voters.",
+            exc,
+        )
+        return
+
+    for repo_id in HF_NEWS_MODEL_IDS:
+        try:
+            logger.info("[HF-NEWS] Loading %s", repo_id)
+            tokenizer = AutoTokenizer.from_pretrained(repo_id)
+            model = AutoModelForSequenceClassification.from_pretrained(repo_id)
+            model.eval()
+
+            hf_news_classifiers.append({
+                "name": f"HF: {repo_id.split('/')[-1]}",
+
+                "repo_id": repo_id,
+                "tokenizer": tokenizer,
+                "model": model,
+            })
+
+            logger.info(
+                "[HF-NEWS] Loaded %s | labels=%s",
+                repo_id,
+                getattr(model.config, "id2label", {}),
+            )
+        except Exception as exc:
+            # A missing, renamed, private, or incompatible repo must never
+            # take down the rest of the ensemble — it just doesn't vote.
+            logger.warning(
+                "[HF-NEWS] Skipping %s: %s: %s",
+                repo_id, type(exc).__name__, exc,
+            )
+
+    logger.info("[HF-NEWS] %d/%d model(s) loaded", len(hf_news_classifiers), len(HF_NEWS_MODEL_IDS))
 def load_all_models():
     MODEL_ERRORS.clear()
     MODEL_LOAD_EVENTS.clear()
@@ -801,14 +876,15 @@ def load_all_models():
     load_local_models()
     load_pretrained_models()
     load_bertphish()
-
+    load_hf_news_classifiers()
     logger.info(
-        "Models ready | news=%s review=%s phishing=%s pretrained=%d bertphish=%s",
+        "Models ready | news=%s review=%s phishing=%s pretrained=%d bertphish=%s hf_news=%d",
         bool(news_model is not None and news_vectorizer is not None),
         bool(review_model is not None and review_vectorizer is not None),
         phishing_model is not None,
         len(pretrained_models),
         bertphish_model is not None,
+        len(hf_news_classifiers),
     )
 
 # ---------------------------------------------------------------------
@@ -1264,7 +1340,78 @@ def bertphish_prediction(url: str):
     except Exception as exc:
         logger.warning("[BERTPhish] Prediction failed: %s", exc)
         return None
+def hf_news_label(id2label: dict, index: int) -> str:
+    raw = str(id2label.get(index, id2label.get(str(index), ""))).strip().lower()
 
+    if any(x in raw for x in ("fake", "false", "unreliable", "misinformation")):
+        return "Fake"
+    if any(x in raw for x in ("real", "true", "reliable", "genuine")):
+        return "Real"
+
+    # LABEL_0 / LABEL_1-style output has no semantic name. Rather than
+    # guess, fall back to an explicit mapping — same pattern as
+    # BERTPHISH_LABELS. Override per your models' actual training order.
+    mapping_env = os.getenv("HF_NEWS_LABEL_MAP", "0=Fake,1=Real")
+    pairs = {}
+    for pair in mapping_env.split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            pairs[k.strip()] = v.strip()
+    mapped = pairs.get(str(index), "")
+    return mapped if mapped in {"Fake", "Real"} else "Unknown"
+
+
+def hf_news_prediction(entry: dict[str, Any], content: str):
+    try:
+        import torch
+
+        tokenizer = entry["tokenizer"]
+        model = entry["model"]
+
+        inputs = tokenizer(
+            content,
+            return_tensors="pt",
+            truncation=True,
+
+            max_length=512,
+            padding=True,
+        )
+
+        with torch.no_grad():
+            output = model(**inputs)
+
+        probs = torch.softmax(output.logits, dim=-1)[0]
+        index = int(torch.argmax(probs).item())
+
+        id2label = getattr(model.config, "id2label", {}) or {}
+        label = hf_news_label(id2label, index)
+
+        if label == "Unknown":
+            logger.warning(
+                "[HF-NEWS] %s: could not resolve label for index=%s (id2label=%s)",
+                entry["repo_id"], index, id2label,
+            )
+            return None
+
+        return make_prediction(
+            entry["name"],
+            label,
+            float(probs[index].item()),
+            source="huggingface",
+        )
+    except Exception as exc:
+        logger.warning("[HF-NEWS] %s prediction failed: %s", entry["repo_id"], exc)
+        return None
+
+
+def hf_news_predictions(content: str):
+
+    results = []
+    for entry in hf_news_classifiers:
+        result = hf_news_prediction(entry, content)
+        if result:
+            results.append(result)
+    return results
 # ---------------------------------------------------------------------
 # MODEL POLL
 # ---------------------------------------------------------------------
@@ -1658,6 +1805,7 @@ def analyze_news(
     predictions.append(
         heuristic_news_vote(headline, article_text, make_prediction)
     )
+    predictions.extend(hf_news_predictions(content))
         # Independently search the web for other coverage of this story and
     # run the SAME local ML model against each one found. This is a real
     # second opinion from separate sources, not just a link list.

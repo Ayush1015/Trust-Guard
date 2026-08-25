@@ -1,141 +1,174 @@
-import { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useEffect, useState } from 'react';
 
-export default function AuthModal({ onClose }) {
-  const { login, signup } = useAuth();
-  const [mode, setMode] = useState('login'); // 'login' | 'signup'
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+export default function AuthModal({ mode = 'login', onClose, onAuthenticated }) {
+  const [activeMode, setActiveMode] = useState(mode);
+  const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
 
-  const handleSubmit = async (e) => {
+  useEffect(() => {
+    setActiveMode(mode);
+  }, [mode]);
+
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (e.key === 'Escape') onClose?.();
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  const update = (field) => (e) => setForm((prev) => ({ ...prev, [field]: e.target.value }));
+
+  const handleSubmit = (e) => {
     e.preventDefault();
     setError('');
 
-    if (!email.trim() || !password) {
-      setError('Email and password are required.');
+    if (activeMode === 'signup' && !form.name.trim()) {
+      setError('Enter your name to create an account.');
       return;
     }
-    if (mode === 'signup' && password.length < 8) {
-      setError('Password must be at least 8 characters.');
+    if (!form.email.trim() || !form.email.includes('@')) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    if (form.password.length < 6) {
+      setError('Password must be at least 6 characters.');
       return;
     }
 
-    setSubmitting(true);
-    try {
-      if (mode === 'signup') {
-        await signup(email.trim(), password);
-      } else {
-        await login(email.trim(), password);
-      }
-      onClose?.();
-    } catch (err) {
-      setError(err.message || 'Something went wrong.');
-    } finally {
-      setSubmitting(false);
-    }
+    onAuthenticated?.({
+      name: form.name.trim() || form.email.split('@')[0],
+      email: form.email.trim(),
+    });
   };
 
   return (
     <div
-      className="position-fixed top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center"
-      style={{ background: 'rgba(3,8,16,.75)', zIndex: 1050 }}
-      onClick={onClose}
+      className="tg-modal-overlay"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose?.();
+      }}
     >
-      <div
-        className="glass-card p-4"
-        style={{ width: '100%', maxWidth: 420 }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="d-flex justify-content-between align-items-center mb-3">
-          <h4 className="text-white fw-bold m-0">
-            {mode === 'login' ? 'Log in' : 'Create your account'}
-          </h4>
-          <button type="button" className="btn-close btn-close-white" onClick={onClose} aria-label="Close" />
+      <div className="tg-modal-panel" role="dialog" aria-modal="true" aria-label="Authentication">
+        <div className="d-flex justify-content-between align-items-start mb-3">
+          <div>
+            <h2 className="fs-5 fw-bold mb-1">
+              {activeMode === 'login' ? 'Welcome back' : 'Create your account'}
+            </h2>
+            <p className="mb-0 small" style={{ color: 'var(--text-muted)' }}>
+              {activeMode === 'login'
+                ? 'Log in to save your analysis history.'
+                : 'Sign up to track scans and set preferences.'}
+            </p>
+          </div>
+          <button type="button" className="tg-modal-close" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
         </div>
 
-        <p className="text-secondary small mb-4">
-          Save your analysis history, get your own token quota, and set a default
-          translation language.
-        </p>
+        <div className="tg-auth-switch mb-4">
+          <button
+            type="button"
+            className={activeMode === 'login' ? 'active' : ''}
+            onClick={() => setActiveMode('login')}
+          >
+            Log in
+          </button>
+          <button
+            type="button"
+            className={activeMode === 'signup' ? 'active' : ''}
+            onClick={() => setActiveMode('signup')}
+          >
+            Sign up
+          </button>
+        </div>
 
         <form onSubmit={handleSubmit} className="d-flex flex-column gap-3">
+          {activeMode === 'signup' && (
+            <div>
+              <label htmlFor="auth-name" className="form-label small fw-semibold mb-1">
+                Full name
+              </label>
+              <input
+                id="auth-name"
+                type="text"
+                className="form-control form-control-custom"
+                placeholder="Jordan Rivera"
+                value={form.name}
+                onChange={update('name')}
+                autoComplete="name"
+              />
+            </div>
+          )}
+
           <div>
-            <label htmlFor="auth-email" className="form-label text-secondary small fw-semibold">
+            <label htmlFor="auth-email" className="form-label small fw-semibold mb-1">
               Email
             </label>
             <input
               id="auth-email"
               type="email"
               className="form-control form-control-custom"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              value={form.email}
+              onChange={update('email')}
               autoComplete="email"
-              disabled={submitting}
-              required
             />
           </div>
 
           <div>
-            <label htmlFor="auth-password" className="form-label text-secondary small fw-semibold">
+            <label htmlFor="auth-password" className="form-label small fw-semibold mb-1">
               Password
             </label>
             <input
               id="auth-password"
               type="password"
               className="form-control form-control-custom"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              disabled={submitting}
-              required
-              minLength={mode === 'signup' ? 8 : undefined}
+              placeholder="••••••••"
+              value={form.password}
+              onChange={update('password')}
+              autoComplete={activeMode === 'login' ? 'current-password' : 'new-password'}
             />
-            {mode === 'signup' && (
-              <div className="form-text text-muted">At least 8 characters.</div>
-            )}
           </div>
 
           {error && (
-            <div className="text-danger small" role="alert">
-              <i className="bi bi-exclamation-triangle me-1" />
+            <div className="small" style={{ color: 'var(--danger)' }}>
               {error}
             </div>
           )}
 
-          <button type="submit" className="btn btn-cyber d-flex align-items-center justify-content-center gap-2" disabled={submitting}>
-            {submitting ? (
+          <button type="submit" className="btn btn-cyber w-100 justify-content-center mt-1">
+            {activeMode === 'login' ? 'Log in' : 'Create account'}
+          </button>
+
+          <p className="text-center small mb-0" style={{ color: 'var(--text-muted)' }}>
+            {activeMode === 'login' ? (
               <>
-                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
-                {mode === 'login' ? 'Logging in...' : 'Creating account...'}
+                New here?{' '}
+                <button
+                  type="button"
+                  className="btn btn-link btn-sm p-0 align-baseline"
+                  style={{ color: 'var(--accent-cyan)' }}
+                  onClick={() => setActiveMode('signup')}
+                >
+                  Create an account
+                </button>
               </>
-            ) : mode === 'login' ? (
-              'Log in'
             ) : (
-              'Sign up'
+              <>
+                Already have an account?{' '}
+                <button
+                  type="button"
+                  className="btn btn-link btn-sm p-0 align-baseline"
+                  style={{ color: 'var(--accent-cyan)' }}
+                  onClick={() => setActiveMode('login')}
+                >
+                  Log in
+                </button>
+              </>
             )}
-          </button>
+          </p>
         </form>
-
-        <div className="text-center mt-3">
-          <button
-            type="button"
-            className="btn btn-link btn-sm text-info text-decoration-none"
-            onClick={() => {
-              setError('');
-              setMode((m) => (m === 'login' ? 'signup' : 'login'));
-            }}
-          >
-            {mode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Log in'}
-          </button>
-        </div>
-
-        <div className="text-center mt-2">
-          <button type="button" className="btn btn-link btn-sm text-secondary text-decoration-none" onClick={onClose}>
-            Continue as guest
-          </button>
-        </div>
       </div>
     </div>
   );

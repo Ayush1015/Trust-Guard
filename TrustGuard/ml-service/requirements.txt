@@ -10,5 +10,6 @@ trafilatura>=2.0
 google-genai>=1.0
 transformers>=4.50
 python-whois>=0.9
+sentencepiece>=0.2
 # Install a matching torch/torchvision pair for BERTPhish.
 # Example: use the official PyTorch selector for your CPU/CUDA setup.
