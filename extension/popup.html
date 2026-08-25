@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TrustGuard</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <span class="shield">🛡️</span>
+      <div>
+        <h1>TrustGuard</h1>
+        <p class="sub">Quick trust check for this page</p>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="news">📰 News</button>
+      <button class="tab" data-tab="review">⭐ Reviews</button>
+      <button class="tab" data-tab="phishing">🔗 Link</button>
+    </div>
+
+    <section id="panel-news" class="panel active">
+      <p class="hint">Analyzes the article text on the current page.</p>
+      <button id="checkNews" class="btn-primary">Check this article</button>
+    </section>
+
+    <section id="panel-review" class="panel">
+      <p class="hint">Scans visible reviews on the current page for spam/fake patterns.</p>
+      <button id="checkReviews" class="btn-primary">Check reviews on this page</button>
+    </section>
+
+    <section id="panel-phishing" class="panel">
+      <p class="hint">Checks the current page's URL against phishing signals.</p>
+      <button id="checkPhishing" class="btn-primary">Check this URL</button>
+    </section>
+
+    <div id="loading" class="loading hidden">
+      <span class="spinner"></span> Analyzing...
+    </div>
+
+    <div id="result" class="result hidden"></div>
+    <div id="error" class="error hidden"></div>
+
+    <footer>
+      <a href="http://localhost:5173" target="_blank" rel="noopener">Open full dashboard →</a>
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

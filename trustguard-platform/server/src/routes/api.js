@@ -3,56 +3,88 @@ import express from 'express';
 import {
   analyzeNews,
   analyzeReview,
+  analyzeReviewPage,
   analyzePhishing,
   translateNews,
   summarizeNews,
   analysisHealth
 } from '../controllers/analyzeController.js';
 
+import {
+  signup,
+  login,
+  me,
+  history,
+  historyDetail,
+  updatePreferences
+} from '../controllers/authController.js';
+
+import { requireAuth, optionalAuth, trackTokenUsage } from '../middleware/auth.js';
+
 const router = express.Router();
+
+
+// ============================================================
+// AUTH ROUTES (new — additive, does not affect existing routes)
+// ============================================================
+
+router.post('/auth/signup', signup);
+router.post('/auth/login', login);
+router.get('/auth/me', requireAuth, me);
+router.get('/auth/history', requireAuth, history);
+router.get('/auth/history/:id', requireAuth, historyDetail);
+router.patch('/auth/preferences', requireAuth, updatePreferences);
 
 
 // ============================================================
 // ANALYSIS ROUTES
 // ============================================================
-import { requireAuth, optionalAuth, trackTokenUsage } from '../middleware/auth.js';
-import { signup, login, me, history, updatePreferences } from '../controllers/authController.js';
+//
+// optionalAuth: attaches req.userId when a valid token is sent, but never
+// blocks guests — existing anonymous usage keeps working exactly as before.
+//
+// trackTokenUsage: only enforces a quota for logged-in users; guests are
+// unaffected (existing behavior preserved).
 
-// AUTH (new, additive — does not touch existing routes)
-router.post('/auth/signup', signup);
-router.post('/auth/login', login);
-router.get('/auth/me', requireAuth, me);
-router.get('/auth/history', requireAuth, history);
-router.patch('/auth/preferences', requireAuth, updatePreferences);
-
-// Apply optionalAuth + trackTokenUsage in front of the existing analyze routes:
-router.post('/analyze/news', optionalAuth, trackTokenUsage, analyzeNews);
-router.post('/analyze/review', optionalAuth, trackTokenUsage, analyzeReview);
-router.post('/analyze/phishing', optionalAuth, trackTokenUsage, analyzePhishing);
 // Fake News
 router.post(
   '/analyze/news',
+  optionalAuth,
+  trackTokenUsage,
   analyzeNews
 );
 
 
 // Fake Reviews
-// router.post(
-//   '/analyze/review',
-//   analyzeReview
-// );
+router.post(
+  '/analyze/review',
+  optionalAuth,
+  trackTokenUsage,
+  analyzeReview
+);
+
+// Fake Reviews — full page / extension bulk mode
+router.post(
+  '/analyze/review/page',
+  optionalAuth,
+  trackTokenUsage,
+  analyzeReviewPage
+);
 
 
 // Phishing URL
-// router.post(
-//   '/analyze/phishing',
-//   analyzePhishing
-// );
+router.post(
+  '/analyze/phishing',
+  optionalAuth,
+  trackTokenUsage,
+  analyzePhishing
+);
 
 
 // News Translation
 router.post(
   '/analyze/news/translate',
+  optionalAuth,
   translateNews
 );
 
@@ -60,6 +92,7 @@ router.post(
 // News Summary
 router.post(
   '/analyze/news/summary',
+  optionalAuth,
   summarizeNews
 );
 

@@ -1,4 +1,4 @@
-
+import AccountMenu from './AccountMenu';
 export default function Navbar() {
   return (
     <nav className="navbar navbar-expand-lg glass-card border-0 border-bottom rounded-0 py-3 mb-4 sticky-top">
@@ -16,10 +16,11 @@ export default function Navbar() {
         </div>
         <div className="ms-auto d-flex align-items-center">
           <span className="pulse-indicator pulsing-green"></span>
-          <span className="text-muted small" style={{color: '#f9f9f9'
+          <span className="text-muted small" style={{color: '#ffffff'
           }}>System Ready</span>
         </div>
       </div>
+        <AccountMenu />
     </nav>
   );
 }

@@ -1,4 +1,3 @@
-
 """
 TrustGuard ML Service
 FastAPI ensemble service for news, reviews and phishing.
@@ -9,6 +8,7 @@ Run:
 Expected:
     ml-service/
       main.py
+      trust_extras.py
       .env
       models/
       pretrained_models/
@@ -31,15 +31,40 @@ from urllib.parse import urlparse
 import joblib
 import numpy as np
 import requests
-import difflib
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from trust_extras import (
+    heuristic_news_vote,
+    heuristic_review_vote,
+    heuristic_phishing_vote,
+    duckduckgo_related,
+    domain_age_days,
+)
+from news_intelligence import (
+    search_related_articles,
+    cross_check_related,
+    classify_style,
+    extractive_summary,
+    free_translate,
+    offline_news_verification,
+)
+from gemini_backup import GeminiKeyRotator, is_quota_error
+
+
 # ---------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------
+
 BASE_DIR = Path(__file__).resolve().parent
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("trustguard")
+
 
 def load_env_file_safely(path: Path) -> None:
     """
@@ -82,6 +107,7 @@ def load_env_file_safely(path: Path) -> None:
     except Exception as exc:
         logger.warning("[ENV] Could not read %s: %s", path, exc)
 
+
 load_env_file_safely(BASE_DIR / ".env")
 
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -93,6 +119,16 @@ MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "100000"))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+
+GEMINI_API_KEYS = (
+    [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
+    or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+)
+gemini_rotator = GeminiKeyRotator(GEMINI_API_KEYS, cooldown_seconds=90)
+
+# WHOIS domain-age lookups are a real network call with real latency, so
+# they stay opt-in rather than firing on every phishing check by default.
+ENABLE_DOMAIN_AGE_LOOKUP = os.getenv("ENABLE_DOMAIN_AGE_LOOKUP", "false").lower() == "true"
 
 CORS_ORIGINS = [
     x.strip()
@@ -146,12 +182,6 @@ PRETRAINED_DIR = (
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("trustguard")
-
 # ---------------------------------------------------------------------
 # GLOBAL STATE
 # ---------------------------------------------------------------------
@@ -184,7 +214,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TrustGuard ML Service",
-    version="5.1.0",
+    version="5.2.0",
     description="TrustGuard multi-model digital verification engine",
     lifespan=lifespan,
 )
@@ -221,6 +251,12 @@ class TranslationPayload(BaseModel):
 class SummaryPayload(BaseModel):
     text: str = Field(..., min_length=1, max_length=50_000)
     language: str = Field(default="English", max_length=80)
+
+class ReviewPagePayload(BaseModel):
+    """Batch-analyze every review on a product page in one call, plus a
+    simple rating-distribution check (e.g. suspicious 5-star pileups)."""
+    reviews: list[str] = Field(default_factory=list, max_length=100)
+    ratings: list[float] = Field(default_factory=list, max_length=100)
 
 # ---------------------------------------------------------------------
 # HELPERS
@@ -283,39 +319,6 @@ def validate_public_url(url: str):
 # ---------------------------------------------------------------------
 # MODEL LOADING
 # ---------------------------------------------------------------------
-POPULAR_DOMAINS = ["google.com","paypal.com","amazon.com","microsoft.com","apple.com",
-                    "facebook.com","netflix.com","bankofamerica.com","chase.com","irs.gov"]
-
-def typosquat_check(hostname: str):
-    for domain in POPULAR_DOMAINS:
-        ratio = difflib.SequenceMatcher(None, hostname, domain).ratio()
-        if 0.75 <= ratio < 1.0:   # similar but not identical = likely typosquat
-            return domain
-    return None
-
-def redirect_chain_check(url: str):
-    try:
-        resp = requests.head(url, timeout=8, allow_redirects=True)
-        hops = len(resp.history)
-        final_host = urlparse(resp.url).hostname
-        return {"hops": hops, "final_host": final_host, "suspicious": hops >= 3}
-    except Exception:
-        return {"hops": 0, "final_host": None, "suspicious": False}
-
-def heuristic_phishing_vote(url: str, data: dict):
-    hostname = data["hostname"]
-    typosquat_target = typosquat_check(hostname)
-    redirects = redirect_chain_check(url)
-
-    red_flags = 0
-    if typosquat_target: red_flags += 2
-    if redirects["suspicious"]: red_flags += 1
-    if not data["ssl"]: red_flags += 1
-    if data["shady_tld"]: red_flags += 1
-
-    label = "Phishing" if red_flags >= 2 else "Safe"
-    return make_prediction("Standard Checklist (typosquat/redirect/SSL/TLD)", label, 0.6,
-                            source="heuristic", weight=0.75), typosquat_target, redirects
 
 def record_error(message: str):
     MODEL_ERRORS.append(message)
@@ -783,10 +786,11 @@ def load_all_models():
         )
     logger.info("==========================================")
     logger.info(
-        "[CONFIG] GEMINI_API_KEY=%s | GEMINI_MODEL=%s | BERTPHISH=%s",
+        "[CONFIG] GEMINI_API_KEY=%s | GEMINI_MODEL=%s | BERTPHISH=%s | DOMAIN_AGE_LOOKUP=%s",
         "configured" if GEMINI_API_KEY else "not configured",
         GEMINI_MODEL,
         os.getenv("ENABLE_BERTPHISH", "false"),
+        ENABLE_DOMAIN_AGE_LOOKUP,
     )
     if getattr(phishing_model, "n_features_in_", None) == 21:
         logger.warning(
@@ -1196,28 +1200,7 @@ def pretrained_phishing_predictions(url: str):
         if result:
             results.append(result)
     return results
-# --- add to main.py, near the other prediction helpers ---
 
-def heuristic_news_vote(headline: str, text: str):
-    """Cheap stylometric heuristic — always available, zero dependencies."""
-    content = f"{headline} {text}".lower()
-    clickbait_markers = ["you won't believe", "shocking", "!!!", "miracle cure",
-                          "doctors hate", "secret they don't want", "click here"]
-    score = sum(1 for m in clickbait_markers if m in content)
-    excess_caps = sum(1 for w in content.split() if w.isupper() and len(w) > 3)
-    if score >= 2 or excess_caps > 5:
-        return make_prediction("Heuristic Style Check", "Fake", 0.55, source="heuristic", weight=0.5)
-    return make_prediction("Heuristic Style Check", "Real", 0.55, source="heuristic", weight=0.5)
-
-def heuristic_review_vote(text: str):
-    content = text.lower()
-    spam_markers = ["best product ever", "5 stars!!!", "buy now", "highly recommend!!!",
-                     "changed my life", "verified purchase" ]
-    exclam = content.count("!")
-    superlatives = sum(1 for w in ["amazing", "perfect", "incredible", "best ever"] if w in content)
-    if exclam >= 4 or superlatives >= 2:
-        return make_prediction("Heuristic Spam Pattern", "Fake", 0.5, source="heuristic", weight=0.5)
-    return make_prediction("Heuristic Spam Pattern", "Genuine", 0.5, source="heuristic", weight=0.5)
 # ---------------------------------------------------------------------
 # BERTPHISH
 # ---------------------------------------------------------------------
@@ -1409,33 +1392,29 @@ def extract_article(url: str) -> dict[str, str]:
 # ---------------------------------------------------------------------
 # GEMINI
 # ---------------------------------------------------------------------
-
 def get_gemini_client(request_key: Optional[str] = None):
-    global gemini_client
-
-    api_key = (request_key or "").strip() or GEMINI_API_KEY
-    if not api_key:
-        return None
-
-    # Per-request client keys are deliberately NOT cached globally.
-    if request_key:
+    """Returns (client, key_used). key_used is None when request_key was
+    supplied (per-user keys aren't tracked by the rotator/cooldown --
+    that's the user's own quota to manage)."""
+    api_key = (request_key or "").strip()
+    if api_key:
         try:
             from google import genai
-            return genai.Client(api_key=api_key)
+            return genai.Client(api_key=api_key), None
         except Exception as exc:
             logger.warning("Gemini request client failed: %s", exc)
-            return None
+            return None, None
 
-    if gemini_client is not None:
-        return gemini_client
+    key = gemini_rotator.get_key()
+    if not key:
+        return None, None
 
     try:
         from google import genai
-        gemini_client = genai.Client(api_key=api_key)
-        return gemini_client
+        return genai.Client(api_key=key), key
     except Exception as exc:
         logger.warning("Gemini initialization failed: %s", exc)
-        return None
+        return None, None
 
 def extract_grounding_sources(response: Any) -> list[dict[str, str]]:
     sources = []
@@ -1474,33 +1453,12 @@ def extract_grounding_sources(response: Any) -> list[dict[str, str]]:
         logger.debug("Grounding source extraction failed: %s", exc)
 
     return sources[:15]
-def duckduckgo_related(query: str, limit=5):
-    try:
-        resp = requests.get("https://html.duckduckgo.com/html/",
-                             params={"q": query}, timeout=8,
-                             headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(resp.text, "html.parser")
-        results = []
-        for a in soup.select(".result__a")[:limit]:
-            results.append({"title": a.get_text(strip=True), "url": a.get("href")})
-        return results
-    except Exception:
-        return []
 def gemini_news_check(
     headline: str,
     article_url: str,
     article_text: str,
     request_key: Optional[str] = None,
 ):
-    client = get_gemini_client(request_key)
-    if not client:
-        return {
-            "available": False,
-            "label": "Unknown",
-            "explanation": "Gemini is not configured.",
-            "sources": [],
-        }
-
     prompt = f"""
 You are TrustGuard's independent news verification engine.
 
@@ -1526,88 +1484,92 @@ CLAIM: main claim being checked
 UNCERTAINTY: important limitations
 """
 
-    try:
-        from google.genai import types
+    attempts = max(1, len(GEMINI_API_KEYS)) if not request_key else 1
 
-        tools = [
-            types.Tool(
-                google_search=types.GoogleSearch()
+    for _attempt in range(attempts):
+        client, key_used = get_gemini_client(request_key)
+        if not client:
+            break  # no usable key -- fall through to the offline path
+
+        try:
+            from google.genai import types
+
+            tools = [types.Tool(google_search=types.GoogleSearch())]
+            if article_url:
+                tools.append(types.Tool(url_context=types.UrlContext()))
+
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(tools=tools, temperature=0.1),
             )
-        ]
-        if article_url:
-            tools.append(
-                types.Tool(
-                    url_context=types.UrlContext()
-                )
+
+            output = str(getattr(response, "text", "") or "").strip()
+            match = re.search(r"LABEL\s*:\s*(REAL|FAKE|UNKNOWN)", output.upper())
+            label = (
+                "Real" if match and match.group(1) == "REAL"
+                else "Fake" if match and match.group(1) == "FAKE"
+                else "Unknown"
             )
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=tools,
-                temperature=0.1,
-            ),
-        )
+            return {
+                "available": True,
+                "label": label,
+                "explanation": output,
+                "sources": extract_grounding_sources(response),
+            }
+        except Exception as exc:
+            if key_used and is_quota_error(exc):
+                logger.warning("Gemini key exhausted, rotating: %s", exc)
+                gemini_rotator.mark_exhausted(key_used)
+                continue  # try the next key
+            # Non-quota Gemini error (bad request, network issue, etc.) --
+            # still fall through to the offline path below rather than
+            # giving up, since the goal is "always produce a verdict."
+            logger.warning("Gemini news check failed, falling back to offline verification: %s", exc)
+            break
 
-        output = str(getattr(response, "text", "") or "").strip()
-        match = re.search(
-            r"LABEL\s*:\s*(REAL|FAKE|UNKNOWN)",
-            output.upper(),
-        )
-        label = (
-            "Real" if match and match.group(1) == "REAL"
-            else "Fake" if match and match.group(1) == "FAKE"
-            else "Unknown"
-        )
+    # Reached whenever Gemini wasn't usable at all: not configured, every
+    # key rate-limited, or a non-quota failure above. Python does the
+    # verification task itself instead of returning "unavailable."
+    logger.info("Gemini unavailable for news verification -- using offline Python fallback.")
+    return offline_news_verification(headline, article_text, extract_article, local_news_prediction)
 
-        return {
-            "available": True,
-            "label": label,
-            "explanation": output,
-            "sources": extract_grounding_sources(response),
-        }
-    except Exception as exc:
-        logger.warning("Gemini news check failed: %s", exc)
-        return {
-            "available": False,
-            "label": "Unknown",
-            "explanation": f"Gemini verification failed: {exc}",
-            "sources": [],
-        }
+    
+def gemini_generate(prompt: str, request_key: Optional[str] = None):
+    attempts = max(1, len(GEMINI_API_KEYS)) if not request_key else 1
 
-def gemini_generate(
-    prompt: str,
-    request_key: Optional[str] = None,
-):
-    client = get_gemini_client(request_key)
-    if not client:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Gemini is not configured. Add GEMINI_API_KEY "
-                "to .env or send X-Gemini-API-Key."
-            ),
-        )
+    last_error: Optional[Exception] = None
+    for _attempt in range(attempts):
+        client, key_used = get_gemini_client(request_key)
+        if not client:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Gemini is not configured or all keys are on cooldown. "
+                    "Add GEMINI_API_KEY(S) to .env or send X-Gemini-API-Key."
+                ),
+            )
 
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        output = str(getattr(response, "text", "") or "").strip()
-        if not output:
-            raise RuntimeError("Gemini returned an empty response.")
-        return output
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("Gemini request failed: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gemini request failed: {exc}",
-        )
+        try:
+            response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            output = str(getattr(response, "text", "") or "").strip()
+            if not output:
+                raise RuntimeError("Gemini returned an empty response.")
+            return output
+        except Exception as exc:
+            last_error = exc
+            if key_used and is_quota_error(exc):
+                logger.warning("Gemini key exhausted, rotating: %s", exc)
+                gemini_rotator.mark_exhausted(key_used)
+                continue
+            logger.warning("Gemini request failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"Gemini request failed: {exc}")
 
+    raise HTTPException(
+        status_code=503,
+        detail=f"All configured Gemini keys are currently rate-limited: {last_error}",
+    )
 # ---------------------------------------------------------------------
 # ENDPOINTS
 # ---------------------------------------------------------------------
@@ -1616,7 +1578,7 @@ def gemini_generate(
 def root():
     return {
         "service": "TrustGuard ML Service",
-        "version": "5.1.0",
+        "version": "5.2.0",
         "status": model_status(),
     }
 
@@ -1676,9 +1638,13 @@ def analyze_news(
             detail="The supplied news content is too short for analysis.",
         )
 
+    # -----------------------------------------------------------------
+    # Gather every voter's prediction FIRST, then poll once. Each voter
+    # is called exactly once -- a heuristic counted twice would silently
+    # double its weight in the ensemble.
+    # -----------------------------------------------------------------
     predictions = []
-    predictions.append(heuristic_news_vote(headline, article_text))   
-              
+
     local = local_news_prediction(content)
     if local:
         predictions.append(local)
@@ -1687,6 +1653,16 @@ def analyze_news(
         pretrained_text_predictions("news", content)
     )
 
+    # Always-available zero-dependency stylometric voter -- keeps the
+    # ensemble multi-model even when Kaggle/BERTPhish/Gemini are all down.
+    predictions.append(
+        heuristic_news_vote(headline, article_text, make_prediction)
+    )
+        # Independently search the web for other coverage of this story and
+    # run the SAME local ML model against each one found. This is a real
+    # second opinion from separate sources, not just a link list.
+
+    style = classify_style(headline, article_text)
     # Gemini is an independent verification voter only when it actually
     # returns a classification. It does not receive fake confidence.
     gemini = gemini_news_check(
@@ -1705,6 +1681,21 @@ def analyze_news(
             )
         )
 
+    related_articles = search_related_articles(headline or content[:120], extract_article)
+    cross_check = cross_check_related(content, related_articles, local_news_prediction)
+
+    cross_check_weight = 0.6 if gemini["available"] else 1.0
+
+    for vote in cross_check["crossCheckVotes"]:
+        predictions.append(
+            make_prediction(
+                f"Cross-check: {vote['sourceTitle'][:40]}",
+                vote["label"],
+                vote.get("confidence"),
+                source="cross_check",
+                weight=cross_check_weight,
+            )
+        )
     poll = model_poll(predictions, "Fake News")
     winner = poll["winner"]
 
@@ -1713,6 +1704,13 @@ def analyze_news(
         else "danger" if winner == "Fake"
         else "warning"
     )
+
+    # "Related sources" falls back to a free DuckDuckGo search -- but only
+    # once, and only when Gemini genuinely found nothing, so a user
+    # without a Gemini key still gets related links.
+    related_sources = gemini["sources"] or [
+        {"title": a["title"], "url": a["url"]} for a in related_articles
+    ]
 
     return {
         "success": True,
@@ -1735,6 +1733,8 @@ def analyze_news(
         ),
         "poll": poll,
         "models": predictions,
+        "crossCheck": cross_check,
+        "styleAssessment": style,
         "input": {
             "headline": headline,
             "articleUrl": article_url,
@@ -1742,11 +1742,12 @@ def analyze_news(
         },
         "webVerification": {
             "available": gemini["available"],
+            "mode": gemini.get("mode", "gemini"),
             "vote": gemini["label"],
             "explanation": gemini["explanation"],
             "sources": gemini["sources"],
         },
-        "relatedNews": gemini["sources"],
+        "relatedNews": related_sources,
     }
 
 @app.post("/analyze/review")
@@ -1759,13 +1760,18 @@ def analyze_review(payload: TextPayload):
         )
 
     predictions = []
-    predictions.append(heuristic_review_vote(content))                
+
     local = local_review_prediction(content)
     if local:
         predictions.append(local)
 
     predictions.extend(
         pretrained_text_predictions("review", content)
+    )
+
+    # Always-available zero-dependency spam-pattern voter, called once.
+    predictions.append(
+        heuristic_review_vote(content, make_prediction)
     )
 
     poll = model_poll(predictions, "Fake Review")
@@ -1807,6 +1813,52 @@ def analyze_review(payload: TextPayload):
         "models": predictions,
     }
 
+@app.post("/analyze/review/page")
+def analyze_review_page(payload: ReviewPagePayload):
+    """Batch-analyze every review on a product page in one call, plus a
+    simple check for suspicious rating-distribution skew (e.g. a pile of
+    5-star ratings with little else -- a common review-bombing pattern)."""
+    if not payload.reviews:
+        raise HTTPException(status_code=400, detail="At least one review is required.")
+
+    results = []
+    for raw in payload.reviews[:100]:
+        text = clean_text(raw)
+        if len(text) < 10:
+            continue
+        try:
+            result = analyze_review(TextPayload(text=text))
+            results.append(result)
+        except HTTPException:
+            continue
+
+    total = len(results) or 1
+    fake_count = sum(1 for r in results if r["label"] == "Fake")
+    fake_ratio = fake_count / total
+
+    rating_skew = None
+    if payload.ratings:
+        numeric_ratings = [r for r in payload.ratings if isinstance(r, (int, float))]
+        if numeric_ratings:
+            five_star_pct = sum(1 for r in numeric_ratings if r >= 4.5) / len(numeric_ratings)
+            rating_skew = (
+                "Suspicious (rating-bombed toward 5 stars)"
+                if five_star_pct > 0.85
+                else "Normal distribution"
+            )
+
+    verdict = "Likely Fake Reviews Present" if fake_ratio > 0.4 else "Reviews Look Genuine"
+
+    return {
+        "success": True,
+        "reviewsAnalyzed": len(results),
+        "fakeReviewCount": fake_count,
+        "fakeReviewRatio": round(fake_ratio * 100, 1),
+        "ratingPatternAssessment": rating_skew,
+        "verdict": verdict,
+        "details": results,
+    }
+
 @app.post("/analyze/phishing")
 def analyze_phishing(payload: UrlPayload):
     url = normalize_url(payload.url)
@@ -1815,6 +1867,8 @@ def analyze_phishing(payload: UrlPayload):
         validate_public_url(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    data = url_feature_data(url)
 
     predictions = []
 
@@ -1830,12 +1884,16 @@ def analyze_phishing(payload: UrlPayload):
     if bert:
         predictions.append(bert)
 
+    # Standard checklist voter (typosquat / redirect chain / SSL / TLD) --
+    # called exactly once. Its sub-signals are returned to the frontend
+    # as `standardChecklist` regardless of which way it voted.
+    checklist_vote, checklist = heuristic_phishing_vote(
+        url, data["hostname"], bool(data["ssl"]), bool(data["shady_tld"]), make_prediction
+    )
+    predictions.append(checklist_vote)
+
     poll = model_poll(predictions, "Phishing")
     winner = poll["winner"]
-    data = url_feature_data(url)
-    
-    heuristic_vote, typosquat_target, redirects = heuristic_phishing_vote(url, data)
-    predictions.append(heuristic_vote)
 
     if winner == "Phishing":
         risk = (
@@ -1865,6 +1923,16 @@ def analyze_phishing(payload: UrlPayload):
         indicators.append("@ symbol in URL")
     if data["hostname"] and data["hostname"].count(".") > 3:
         indicators.append("many subdomains")
+    if checklist["typosquattingOf"]:
+        indicators.append(f"looks like a typosquat of {checklist['typosquattingOf']}")
+    if checklist["redirectHops"] >= 3:
+        indicators.append(f"long redirect chain ({checklist['redirectHops']} hops)")
+
+    # WHOIS lookups are a real network call, so they're opt-in
+    # (ENABLE_DOMAIN_AGE_LOOKUP) rather than run on every request.
+    domain_age = (
+        domain_age_days(data["hostname"]) if ENABLE_DOMAIN_AGE_LOOKUP else None
+    )
 
     return {
         "success": True,
@@ -1874,7 +1942,9 @@ def analyze_phishing(payload: UrlPayload):
         "riskLevel": risk,
         "metrics": {
             "sslValid": bool(data["ssl"]),
-            "domainAge": "Not checked",
+            "domainAge": (
+                f"{domain_age} days" if domain_age is not None else "Not checked"
+            ),
             "tldTrust": (
                 "Low" if data["shady_tld"]
                 else "No obvious suspicious TLD"
@@ -1899,41 +1969,53 @@ def analyze_phishing(payload: UrlPayload):
         "models": predictions,
         "url": url,
         "standardChecklist": {
-        "typosquattingOf": typosquat_target,
-        "redirectHops": redirects["hops"],
-        "finalDestination": redirects["final_host"],
+            **checklist,
+            "domainAgeDays": domain_age,
         },
     }
-
+@app.get("/gemini/status")
+def gemini_status():
+    return {"success": True, "rotator": gemini_rotator.status()}
 @app.post("/analyze/news/translate")
 def translate_news(
     payload: TranslationPayload,
     x_gemini_api_key: Optional[str] = Header(default=None),
 ):
-    result = gemini_generate(
-        f"""
+    prompt = f"""
 Translate the following content into {payload.language}.
 Preserve names, dates, organizations, places, numbers and factual meaning.
 Do not add facts.
 
 CONTENT:
 {payload.text}
-""",
-        x_gemini_api_key,
-    )
-    return {
-        "success": True,
-        "language": payload.language,
-        "translation": result,
-    }
+"""
 
+    try:
+        result = gemini_generate(prompt, x_gemini_api_key)
+        return {"success": True, "language": payload.language, "translation": result, "source": "gemini"}
+    except HTTPException:
+        fallback = free_translate(payload.text, payload.language)
+        if fallback:
+            return {
+                "success": True,
+                "language": payload.language,
+                "translation": fallback,
+                "source": "free_translate_fallback",
+            }
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Translation is temporarily unavailable: Gemini failed and no "
+                "backup translator is installed. Run `pip install deep-translator` "
+                "to enable the offline-key-free backup."
+            ),
+        )
 @app.post("/analyze/news/summary")
 def summarize_news(
     payload: SummaryPayload,
     x_gemini_api_key: Optional[str] = Header(default=None),
 ):
-    result = gemini_generate(
-        f"""
+    prompt = f"""
 Summarize the following news in {payload.language}.
 
 Return:
@@ -1948,15 +2030,30 @@ Do not invent facts.
 
 ARTICLE:
 {payload.text}
-""",
-        x_gemini_api_key,
-    )
-    return {
-        "success": True,
-        "language": payload.language,
-        "summary": result,
-    }
+"""
 
+    try:
+        result = gemini_generate(prompt, x_gemini_api_key)
+        return {"success": True, "language": payload.language, "summary": result, "source": "gemini"}
+    except HTTPException:
+        # Gemini unavailable/failed — fall back to a dependency-free
+        # extractive summary so the user still gets *something* useful.
+        fallback = extractive_summary(payload.text, num_sentences=4)
+        if payload.language.strip().lower() not in {"english", "en"}:
+            translated = free_translate(fallback, payload.language)
+            if translated:
+                fallback = translated
+            else:
+                fallback += (
+                    f"\n\n(Automatic translation to {payload.language} was unavailable; "
+                    "showing an English extractive summary instead.)"
+                )
+        return {
+            "success": True,
+            "language": payload.language,
+            "summary": fallback,
+            "source": "extractive_fallback",
+        }
 # ---------------------------------------------------------------------
 # STATUS
 # ---------------------------------------------------------------------
@@ -1983,6 +2080,10 @@ def model_status():
     if bertphish_model is not None:
         active["phishing"].append("BERTPhish")
 
+    active["news"].append("Heuristic Style Check")
+    active["review"].append("Heuristic Spam Pattern")
+    active["phishing"].append("Standard Checklist (typosquat/redirects/SSL/TLD)")
+
     return {
         "active": active,
         "totalActive": sum(len(v) for v in active.values()),
@@ -2003,6 +2104,7 @@ def model_status():
         "bertphish": bertphish_model is not None,
         "gemini": bool(GEMINI_API_KEY),
         "geminiModel": GEMINI_MODEL,
+        "domainAgeLookupEnabled": ENABLE_DOMAIN_AGE_LOOKUP,
         "modelDirectory": str(MODELS_DIR),
         "pretrainedDirectory": str(PRETRAINED_DIR),
         "modelErrors": MODEL_ERRORS[-50:],
@@ -2025,4 +2127,3 @@ if __name__ == "__main__":
         port=PORT,
         reload=RELOAD,
     )
-    

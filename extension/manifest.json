@@ -1,11 +1,29 @@
 {
   "manifest_version": 3,
-  "name": "TrustGuard",
+  "name": "TrustGuard — Fake News, Review & Phishing Checker",
   "version": "1.0.0",
-  "description": "Check news, reviews, and links for trust signals as you browse.",
+  "description": "Check news articles, product reviews, and links for trust signals as you browse.",
   "permissions": ["activeTab", "storage", "scripting"],
-  "host_permissions": ["http://localhost:5000/*", "https://your-deployed-api.example.com/*"],
-  "action": { "default_popup": "popup.html" },
-  "background": { "service_worker": "background.js" },
-  "content_scripts": [{ "matches": ["<all_urls>"], "js": ["content.js"] }]
+  "host_permissions": [
+    "http://localhost:5000/*",
+    "http://127.0.0.1:5000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TrustGuard"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
 }

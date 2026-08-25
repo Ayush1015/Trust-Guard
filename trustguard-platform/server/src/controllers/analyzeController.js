@@ -16,14 +16,20 @@
  * IMPORTANT:
  * This gateway does NOT create fake fallback predictions.
  * If the ML service is unavailable, it returns an error.
+ *
+ * UPGRADE NOTE (auth):
+ * All existing behavior for anonymous/guest requests is unchanged.
+ * When req.userId is present (see middleware/auth.js optionalAuth), the
+ * result is additionally saved to analysis_history and, for the news
+ * endpoint, an automatic translation/summary is attached in the user's
+ * saved preferred_language.
  */
 
+import db from '../db/index.js';
 
 // ============================================================
 // HELPERS
 // ============================================================
-import db from '../db/index.js';
-// ...inside analyzeNews, right before `return res.status(200).json(mlData);`
 
 const getMLServiceUrl = () => {
   return (
@@ -31,7 +37,6 @@ const getMLServiceUrl = () => {
     'http://127.0.0.1:8000'
   );
 };
-
 
 /**
  * Safely call Python ML service.
@@ -59,9 +64,6 @@ const callMLService = async (
 
         headers: {
           'Content-Type': 'application/json',
-
-          // Forward authenticated user information
-          // if your auth middleware provides it.
           ...(options.headers || {})
         },
 
@@ -125,6 +127,41 @@ const callMLService = async (
   }
 };
 
+/** Best-effort user context lookup. Never throws — history/translation
+ *  are enhancements, not required for the core analysis to succeed. */
+const getUserContext = (userId) => {
+  if (!userId) return null;
+  try {
+    return db
+      .prepare('SELECT preferred_language, gemini_api_key FROM users WHERE id = ?')
+      .get(userId);
+  } catch (err) {
+    console.warn('getUserContext failed:', err.message);
+    return null;
+  }
+};
+
+const saveHistory = (userId, type, inputSummary, result) => {
+  if (!userId) return;
+  try {
+    db.prepare(
+      `INSERT INTO analysis_history
+        (user_id, type, input_summary, result_label, confidence, raw_result)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      userId,
+      type,
+      String(inputSummary || '').slice(0, 300),
+      result?.label ?? result?.poll?.winner ?? null,
+      result?.confidence ?? result?.poll?.confidence ?? null,
+      JSON.stringify(result)
+    );
+  } catch (err) {
+    // History is a convenience feature — never fail the analysis over it.
+    console.warn('saveHistory failed:', err.message);
+  }
+};
+
 
 // ============================================================
 // NEWS
@@ -132,36 +169,6 @@ const callMLService = async (
 
 /**
  * POST /api/v1/analyze/news
- *
- * Supports:
- *
- * {
- *   "text": "headline..."
- * }
- *
- * OR
- *
- * {
- *   "headline": "headline...",
- *   "article_url": "https://..."
- * }
- *
- * OR
- *
- * {
- *   "headline": "...",
- *   "article_url": "...",
- *   "article_text": "..."
- * }
- *
- * Gemini:
- *
- * - User Gemini authorization can be forwarded
- *   by your authentication layer.
- *
- * - If the user has no Gemini authorization,
- *   Python can use the TrustGuard server Gemini
- *   configuration.
  */
 export const analyzeNews = async (
   req,
@@ -203,25 +210,10 @@ export const analyzeNews = async (
         ? article_text.trim()
         : '';
 
-
-    // --------------------------------------------------------
-    // Backward compatibility
-    //
-    // Existing frontend:
-    //
-    // { text: "..." }
-    //
-    // continues to work.
-    // --------------------------------------------------------
-
     const finalHeadline =
       newsHeadline ||
       legacyText;
 
-
-    // --------------------------------------------------------
-    // Validate
-    // --------------------------------------------------------
 
     if (
       !finalHeadline &&
@@ -240,11 +232,6 @@ export const analyzeNews = async (
 
       });
     }
-
-
-    // --------------------------------------------------------
-    // Validate minimum content
-    // --------------------------------------------------------
 
     const totalInputLength =
       (
@@ -276,11 +263,9 @@ export const analyzeNews = async (
 
     const payload = {
 
-      // Legacy compatibility
       text:
         finalHeadline,
 
-      // New functionality
       headline:
         finalHeadline,
 
@@ -294,35 +279,16 @@ export const analyzeNews = async (
         mode || 'auto'
     };
 
-
-    // --------------------------------------------------------
-    // Optional user authentication context
-    // --------------------------------------------------------
-    //
-    // DO NOT send raw OAuth secrets from the browser.
-    //
-    // If your authentication middleware has already
-    // authenticated the user, use a server-side identifier
-    // or secure credential reference.
-    //
-    // Example:
-    //
-    // req.user.id
-    //
-    // The Python service can then resolve the user's
-    // authorized Gemini credentials.
-    // --------------------------------------------------------
-
-    if (req.user) {
-
-      payload.user_id =
-        req.user.id;
+    if (req.userId) {
+      payload.user_id = req.userId;
     }
 
 
     // --------------------------------------------------------
-    // Optional internal auth
+    // Optional per-user Gemini key + internal auth header
     // --------------------------------------------------------
+
+    const userContext = getUserContext(req.userId);
 
     const headers = {};
 
@@ -334,6 +300,15 @@ export const analyzeNews = async (
         'X-ML-Service-Token'
       ] =
         process.env.ML_SERVICE_TOKEN;
+    }
+
+    // A saved per-user Gemini key takes precedence over the server default,
+    // matching the existing X-Gemini-API-Key header the client already sends
+    // for anonymous sessions.
+    if (userContext?.gemini_api_key && !req.headers['x-gemini-api-key']) {
+      headers['X-Gemini-API-Key'] = userContext.gemini_api_key;
+    } else if (req.headers['x-gemini-api-key']) {
+      headers['X-Gemini-API-Key'] = req.headers['x-gemini-api-key'];
     }
 
 
@@ -355,7 +330,39 @@ export const analyzeNews = async (
 
 
     // --------------------------------------------------------
-    // Return exactly what Python generated
+    // Auto-translate/summarize into the user's saved language
+    // (additive — failure here never breaks the main result)
+    // --------------------------------------------------------
+
+    if (
+      userContext?.preferred_language &&
+      userContext.preferred_language !== 'English' &&
+      (articleText || finalHeadline)
+    ) {
+      try {
+        mlData.autoSummary = await callMLService(
+          '/analyze/news/summary',
+          {
+            text: articleText || finalHeadline,
+            language: userContext.preferred_language,
+          },
+          { timeout: 30000, headers }
+        );
+      } catch (translateErr) {
+        console.warn('Auto-translate summary failed:', translateErr.message);
+      }
+    }
+
+
+    // --------------------------------------------------------
+    // Save history for logged-in users (additive)
+    // --------------------------------------------------------
+
+    saveHistory(req.userId, 'news', finalHeadline || articleUrl, mlData);
+
+
+    // --------------------------------------------------------
+    // Return exactly what Python generated (+ optional autoSummary)
     // --------------------------------------------------------
 
     return res.status(
@@ -371,18 +378,6 @@ export const analyzeNews = async (
       'Error in analyzeNews:',
       error
     );
-
-    // in analyzeController.js, after getting mlData for /analyze/news:
-    if (req.userId) {
-        const user = db.prepare('SELECT preferred_language FROM users WHERE id = ?').get(req.userId);
-        if (user?.preferred_language && user.preferred_language !== 'English') {
-          mlData.autoSummary = await callMLService('/analyze/news/summary',
-            { text: articleText || finalHeadline, language: user.preferred_language }, { timeout: 30000 });
-  }
-}
-    // --------------------------------------------------------
-    // Timeout
-    // --------------------------------------------------------
 
     if (
       error.name ===
@@ -400,11 +395,6 @@ export const analyzeNews = async (
 
       });
     }
-
-
-    // --------------------------------------------------------
-    // Python service error
-    // --------------------------------------------------------
 
     if (
       error.status
@@ -425,15 +415,6 @@ export const analyzeNews = async (
       });
     }
 
-
-    // --------------------------------------------------------
-    // Service unavailable
-    // --------------------------------------------------------
-    if (req.userId) {
-      db.prepare(
-    'INSERT INTO analysis_history (user_id, type, input_summary, result_label, confidence, raw_result) VALUES (?, ?, ?, ?, ?, ?)'
-       ).run(req.userId, 'news', finalHeadline.slice(0, 200), mlData.label, mlData.confidence, JSON.stringify(mlData));
-    }
     return res.status(
       503
     ).json({
@@ -454,12 +435,6 @@ export const analyzeNews = async (
 
 /**
  * POST /api/v1/analyze/review
- *
- * Payload:
- *
- * {
- *   "text": "This product is amazing..."
- * }
  */
 export const analyzeReview = async (
   req,
@@ -471,11 +446,6 @@ export const analyzeReview = async (
     const {
       text
     } = req.body || {};
-
-
-    // --------------------------------------------------------
-    // Validate
-    // --------------------------------------------------------
 
     if (
       typeof text !== 'string' ||
@@ -494,11 +464,6 @@ export const analyzeReview = async (
       });
     }
 
-
-    // --------------------------------------------------------
-    // Call Python
-    // --------------------------------------------------------
-
     const headers = {};
 
     if (
@@ -510,7 +475,6 @@ export const analyzeReview = async (
       ] =
         process.env.ML_SERVICE_TOKEN;
     }
-
 
     const mlData =
       await callMLService(
@@ -527,10 +491,7 @@ export const analyzeReview = async (
         }
       );
 
-
-    // --------------------------------------------------------
-    // Return ensemble result
-    // --------------------------------------------------------
+    saveHistory(req.userId, 'review', text.trim(), mlData);
 
     return res.status(
       200
@@ -545,7 +506,6 @@ export const analyzeReview = async (
       'Error in analyzeReview:',
       error
     );
-
 
     if (
       error.name ===
@@ -563,7 +523,6 @@ export const analyzeReview = async (
 
       });
     }
-
 
     if (
       error.status
@@ -584,7 +543,6 @@ export const analyzeReview = async (
       });
     }
 
-
     return res.status(
       503
     ).json({
@@ -600,17 +558,63 @@ export const analyzeReview = async (
 
 
 // ============================================================
+// REVIEW — FULL PAGE (extension-style: many reviews + ratings at once)
+// ============================================================
+
+/**
+ * POST /api/v1/analyze/review/page
+ *
+ * Payload:
+ * {
+ *   "reviews": ["text1", "text2", ...],
+ *   "ratings": [5, 5, 1, 4, ...],
+ *   "url": "https://..."
+ * }
+ */
+export const analyzeReviewPage = async (req, res) => {
+  try {
+    const { reviews, ratings, url } = req.body || {};
+
+    if (!Array.isArray(reviews) || reviews.length === 0) {
+      return res.status(400).json({ error: { message: 'At least one review is required.' } });
+    }
+
+    const headers = {};
+    if (process.env.ML_SERVICE_TOKEN) {
+      headers['X-ML-Service-Token'] = process.env.ML_SERVICE_TOKEN;
+    }
+
+    const mlData = await callMLService(
+      '/analyze/review/page',
+      { reviews: reviews.slice(0, 100), ratings: Array.isArray(ratings) ? ratings.slice(0, 100) : [] },
+      { timeout: 90000, headers }
+    );
+
+    saveHistory(req.userId, 'review_page', url || `${reviews.length} reviews`, {
+      label: mlData.verdict,
+      confidence: mlData.fakeReviewRatio,
+      ...mlData,
+    });
+
+    return res.status(200).json(mlData);
+  } catch (error) {
+    console.error('Error in analyzeReviewPage:', error);
+    if (error.status) {
+      return res.status(error.status >= 400 && error.status < 600 ? error.status : 502).json({
+        error: { message: error.message },
+      });
+    }
+    return res.status(503).json({ error: { message: 'TrustGuard ML service is unavailable.' } });
+  }
+};
+
+
+// ============================================================
 // PHISHING
 // ============================================================
 
 /**
  * POST /api/v1/analyze/phishing
- *
- * Payload:
- *
- * {
- *   "url": "https://example.com"
- * }
  */
 export const analyzePhishing = async (
   req,
@@ -622,11 +626,6 @@ export const analyzePhishing = async (
     const {
       url
     } = req.body || {};
-
-
-    // --------------------------------------------------------
-    // Validate URL
-    // --------------------------------------------------------
 
     if (
       typeof url !== 'string' ||
@@ -645,18 +644,8 @@ export const analyzePhishing = async (
       });
     }
 
-
     const normalizedUrl =
       url.trim();
-
-
-    // --------------------------------------------------------
-    // More reliable URL validation
-    //
-    // Do NOT use the old regex.
-    // It rejects many legitimate URLs and can behave badly
-    // with complex URLs.
-    // --------------------------------------------------------
 
     let parsedUrl;
 
@@ -688,7 +677,6 @@ export const analyzePhishing = async (
       });
     }
 
-
     if (
       ![
         'http:',
@@ -710,11 +698,6 @@ export const analyzePhishing = async (
       });
     }
 
-
-    // --------------------------------------------------------
-    // Call Python phishing ensemble
-    // --------------------------------------------------------
-
     const headers = {};
 
     if (
@@ -726,7 +709,6 @@ export const analyzePhishing = async (
       ] =
         process.env.ML_SERVICE_TOKEN;
     }
-
 
     const mlData =
       await callMLService(
@@ -743,10 +725,7 @@ export const analyzePhishing = async (
         }
       );
 
-
-    // --------------------------------------------------------
-    // Return ensemble result
-    // --------------------------------------------------------
+    saveHistory(req.userId, 'phishing', parsedUrl.toString(), mlData);
 
     return res.status(
       200
@@ -761,7 +740,6 @@ export const analyzePhishing = async (
       'Error in analyzePhishing:',
       error
     );
-
 
     if (
       error.name ===
@@ -779,7 +757,6 @@ export const analyzePhishing = async (
 
       });
     }
-
 
     if (
       error.status
@@ -800,7 +777,6 @@ export const analyzePhishing = async (
       });
     }
 
-
     return res.status(
       503
     ).json({
@@ -819,16 +795,6 @@ export const analyzePhishing = async (
 // NEWS TRANSLATION
 // ============================================================
 
-/**
- * POST /api/v1/analyze/news/translate
- *
- * Payload:
- *
- * {
- *   "text": "...",
- *   "language": "Hindi"
- * }
- */
 export const translateNews = async (
   req,
   res
@@ -840,7 +806,6 @@ export const translateNews = async (
       text,
       language
     } = req.body || {};
-
 
     if (
       typeof text !== 'string' ||
@@ -859,7 +824,6 @@ export const translateNews = async (
       });
     }
 
-
     if (
       typeof language !== 'string' ||
       !language.trim()
@@ -877,7 +841,6 @@ export const translateNews = async (
       });
     }
 
-
     const headers = {};
 
     if (
@@ -889,7 +852,6 @@ export const translateNews = async (
       ] =
         process.env.ML_SERVICE_TOKEN;
     }
-
 
     const mlData =
       await callMLService(
@@ -909,7 +871,6 @@ export const translateNews = async (
         }
       );
 
-
     return res.status(
       200
     ).json(
@@ -923,7 +884,6 @@ export const translateNews = async (
       'Error in translateNews:',
       error
     );
-
 
     return res.status(
       error.status || 503
@@ -944,16 +904,6 @@ export const translateNews = async (
 // NEWS SUMMARY
 // ============================================================
 
-/**
- * POST /api/v1/analyze/news/summary
- *
- * Payload:
- *
- * {
- *   "text": "...",
- *   "language": "English"
- * }
- */
 export const summarizeNews = async (
   req,
   res
@@ -965,7 +915,6 @@ export const summarizeNews = async (
       text,
       language = 'English'
     } = req.body || {};
-
 
     if (
       typeof text !== 'string' ||
@@ -984,7 +933,6 @@ export const summarizeNews = async (
       });
     }
 
-
     const headers = {};
 
     if (
@@ -996,7 +944,6 @@ export const summarizeNews = async (
       ] =
         process.env.ML_SERVICE_TOKEN;
     }
-
 
     const mlData =
       await callMLService(
@@ -1018,7 +965,6 @@ export const summarizeNews = async (
         }
       );
 
-
     return res.status(
       200
     ).json(
@@ -1032,7 +978,6 @@ export const summarizeNews = async (
       'Error in summarizeNews:',
       error
     );
-
 
     return res.status(
       error.status || 503
@@ -1053,9 +998,6 @@ export const summarizeNews = async (
 // HEALTH CHECK
 // ============================================================
 
-/**
- * GET /api/v1/analyze/health
- */
 export const analysisHealth = async (
   req,
   res
