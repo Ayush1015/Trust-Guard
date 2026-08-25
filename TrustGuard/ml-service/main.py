@@ -34,7 +34,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
+from services.safe_fetch import safe_fetch_html
 from trust_extras import (
     heuristic_news_vote,
     heuristic_review_vote,
@@ -52,7 +52,10 @@ from news_intelligence import (
 )
 from gemini_backup import GeminiKeyRotator, is_quota_error
 from adapters.model_registry import ModelAdapter, ModelRegistry
-
+from services.claim_service import build_structured_claim, claim_to_search_queries
+from services.temporal_service import classify_currentness
+from services.synthesis_service import synthesize
+from services.cache_service import gemini_news_cache, make_gemini_cache_key
 # ---------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------
@@ -281,6 +284,15 @@ class ReviewPagePayload(BaseModel):
     simple rating-distribution check (e.g. suspicious 5-star pileups)."""
     reviews: list[str] = Field(default_factory=list, max_length=100)
     ratings: list[float] = Field(default_factory=list, max_length=100)
+
+class ClaimPayload(BaseModel):
+    headline: str = Field(default="", max_length=10_000)
+    article_text: str = Field(default="", max_length=100_000)
+class TemporalPayload(BaseModel):
+    published_at: str = Field(default="")
+    mentioned_dates: list[str] = Field(default_factory=list)
+
+
 
 # ---------------------------------------------------------------------
 # HELPERS
@@ -1524,67 +1536,67 @@ def model_poll(predictions: list[dict[str, Any]], task: str):
 # ARTICLE EXTRACTION
 # ---------------------------------------------------------------------
 
-def extract_article(url: str) -> dict[str, str]:
+
+def extract_article(url: str) -> dict[str, Any]:
     url = normalize_url(url)
-    try:
-        validate_public_url(url)
-    except ValueError as exc:
-        logger.warning("Article URL validation failed: %s", exc)
-        return {"title": "", "text": ""}
+
+    fetch_result = safe_fetch_html(url, validate_public_url)
+    if not fetch_result.ok:
+        logger.warning("Article extraction failed for %s: %s", url, fetch_result.error)
+        return {
+            "title": "", "text": "", "published_at": None,
+            "error": fetch_result.error,
+            "errorMessage": fetch_result.error_message,
+        }
+
+    html = fetch_result.html
 
     try:
         import trafilatura
+        extracted = trafilatura.extract(html, include_comments=False, include_tables=False)
+        metadata = trafilatura.extract_metadata(html)
 
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            extracted = trafilatura.extract(
-                downloaded,
-                include_comments=False,
-                include_tables=False,
-            )
-            metadata = trafilatura.extract_metadata(downloaded)
-            title = metadata.title if metadata else ""
-            if extracted:
-                return {
-                    "title": clean_text(title),
-                    "text": clean_text(extracted)[:MAX_ARTICLE_CHARS],
-                }
+        if extracted:
+            return {
+                "title": clean_text(metadata.title if metadata else ""),
+                "text": clean_text(extracted)[:MAX_ARTICLE_CHARS],
+                "published_at": metadata.date if metadata else None,
+                "error": None, "errorMessage": None,
+            }
     except Exception as exc:
-        logger.debug("Trafilatura failed: %s", exc)
+        logger.debug("Trafilatura parse failed on fetched HTML: %s", exc)
 
+    # bs4 fallback reuses the SAME already-fetched HTML — no second
+    # network round-trip, no chance of hitting the zstd bug twice.
     try:
         from bs4 import BeautifulSoup
 
-        response = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/151 Safari/537.36"
-                )
-            },
-        )
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript", "svg"]):
             tag.decompose()
 
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
-        paragraphs = [
-            p.get_text(" ", strip=True)
-            for p in soup.find_all("p")
-        ]
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
         paragraphs = [p for p in paragraphs if len(p) >= 30]
+        text = clean_text("\n".join(paragraphs))[:MAX_ARTICLE_CHARS]
+
+        if not text:
+            return {
+                "title": clean_text(title), "text": "", "published_at": None,
+                "error": "empty_content",
+                "errorMessage": "The page loaded but no readable article text was found.",
+            }
 
         return {
-            "title": clean_text(title),
-            "text": clean_text("\n".join(paragraphs))[:MAX_ARTICLE_CHARS],
+            "title": clean_text(title), "text": text, "published_at": None,
+            "error": None, "errorMessage": None,
         }
     except Exception as exc:
-        logger.warning("Article extraction failed: %s", exc)
-        return {"title": "", "text": ""}
+        logger.warning("BeautifulSoup fallback failed: %s", exc)
+        return {
+            "title": "", "text": "", "published_at": None,
+            "error": "parse_error", "errorMessage": "The page could not be parsed.",
+        }
 
 # ---------------------------------------------------------------------
 # GEMINI
@@ -1656,6 +1668,41 @@ def gemini_news_check(
     article_text: str,
     request_key: Optional[str] = None,
 ):
+    """
+    Verify a news article using Gemini when available.
+
+    Behavior:
+    - User-supplied API keys are never cached.
+    - Server/shared Gemini results are cached.
+    - Gemini API keys rotate on quota exhaustion.
+    - Transient/API failures are never cached.
+    - Falls back to local Python verification when Gemini is unavailable.
+    """
+
+    # ------------------------------------------------------------
+    # 1. Cache only requests using the server's shared API keys.
+    #
+    # A user-provided key has its own quota, so its result must not
+    # be shared with other users.
+    # ------------------------------------------------------------
+    cache_key = None
+
+    if not request_key:
+        cache_key = make_gemini_cache_key(
+            headline,
+            article_url,
+            article_text,
+        )
+
+        cached = gemini_news_cache.get(cache_key)
+
+        if cached is not None:
+            logger.info("[CACHE] Gemini news check cache hit.")
+            return cached
+
+    # ------------------------------------------------------------
+    # 2. Build the verification prompt.
+    # ------------------------------------------------------------
     prompt = f"""
 You are TrustGuard's independent news verification engine.
 
@@ -1675,63 +1722,180 @@ ARTICLE TEXT:
 {article_text[:MAX_ARTICLE_CHARS]}
 
 Return exactly:
+
 LABEL: REAL or FAKE or UNKNOWN
 REASON: concise evidence-based explanation
 CLAIM: main claim being checked
 UNCERTAINTY: important limitations
 """
 
-    attempts = max(1, len(GEMINI_API_KEYS)) if not request_key else 1
+    # ------------------------------------------------------------
+    # 3. Determine how many keys we can try.
+    #
+    # For a user-provided key, only that key is allowed.
+    # For server keys, rotate through available keys.
+    # ------------------------------------------------------------
+    attempts = (
+        max(1, len(GEMINI_API_KEYS))
+        if not request_key
+        else 1
+    )
 
+    # ------------------------------------------------------------
+    # 4. Try Gemini.
+    # ------------------------------------------------------------
     for _attempt in range(attempts):
         client, key_used = get_gemini_client(request_key)
+
         if not client:
-            break  # no usable key -- fall through to the offline path
+            logger.info(
+                "No usable Gemini client available."
+            )
+            break
 
         try:
             from google.genai import types
 
-            tools = [types.Tool(google_search=types.GoogleSearch())]
+            tools = [
+                types.Tool(
+                    google_search=types.GoogleSearch()
+                )
+            ]
+
+            # URL grounding is useful when an article URL exists.
             if article_url:
-                tools.append(types.Tool(url_context=types.UrlContext()))
+                tools.append(
+                    types.Tool(
+                        url_context=types.UrlContext()
+                    )
+                )
 
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(tools=tools, temperature=0.1),
+                config=types.GenerateContentConfig(
+                    tools=tools,
+                    temperature=0.1,
+                ),
             )
 
-            output = str(getattr(response, "text", "") or "").strip()
-            match = re.search(r"LABEL\s*:\s*(REAL|FAKE|UNKNOWN)", output.upper())
-            label = (
-                "Real" if match and match.group(1) == "REAL"
-                else "Fake" if match and match.group(1) == "FAKE"
-                else "Unknown"
+            output = str(
+                getattr(response, "text", "") or ""
+            ).strip()
+
+            # ----------------------------------------------------
+            # 5. Extract the normalized verdict.
+            # ----------------------------------------------------
+            match = re.search(
+                r"LABEL\s*:\s*(REAL|FAKE|UNKNOWN)",
+                output.upper(),
             )
 
-            return {
+            if match and match.group(1) == "REAL":
+                label = "Real"
+            elif match and match.group(1) == "FAKE":
+                label = "Fake"
+            else:
+                label = "Unknown"
+
+            result = {
                 "available": True,
                 "label": label,
                 "explanation": output,
                 "sources": extract_grounding_sources(response),
             }
+
+            # ----------------------------------------------------
+            # 6. Cache ONLY successful server/shared-key results.
+            #
+            # Never cache results generated using a user's own key.
+            # ----------------------------------------------------
+            if cache_key:
+                gemini_news_cache.set(
+                    cache_key,
+                    result,
+                )
+
+                logger.info(
+                    "[CACHE] Gemini news check result cached."
+                )
+
+            return result
+
         except Exception as exc:
+
+            # ----------------------------------------------------
+            # 7. Rotate server keys when quota is exhausted.
+            # ----------------------------------------------------
             if key_used and is_quota_error(exc):
-                logger.warning("Gemini key exhausted, rotating: %s", exc)
-                gemini_rotator.mark_exhausted(key_used)
-                continue  # try the next key
-            # Non-quota Gemini error (bad request, network issue, etc.) --
-            # still fall through to the offline path below rather than
-            # giving up, since the goal is "always produce a verdict."
-            logger.warning("Gemini news check failed, falling back to offline verification: %s", exc)
+                logger.warning(
+                    "Gemini key exhausted, rotating: %s",
+                    exc,
+                )
+
+                gemini_rotator.mark_exhausted(
+                    key_used
+                )
+
+                continue
+
+            # ----------------------------------------------------
+            # 8. Non-quota error.
+            #
+            # Don't cache it. Fall back to the local verifier.
+            # ----------------------------------------------------
+            logger.warning(
+                "Gemini news check failed, "
+                "falling back to offline verification: %s",
+                exc,
+            )
+
             break
 
-    # Reached whenever Gemini wasn't usable at all: not configured, every
-    # key rate-limited, or a non-quota failure above. Python does the
-    # verification task itself instead of returning "unavailable."
-    logger.info("Gemini unavailable for news verification -- using offline Python fallback.")
-    return offline_news_verification(headline, article_text, extract_article, local_news_prediction)
+    # ------------------------------------------------------------
+    # 9. Gemini unavailable.
+    #
+    # The local verifier should still produce a verdict rather
+    # than returning "Gemini unavailable".
+    # ------------------------------------------------------------
+    logger.info(
+        "Gemini unavailable for news verification -- "
+        "using offline Python fallback."
+    )
 
+    try:
+        result = offline_news_verification(
+            headline,
+            article_text,
+            extract_article,
+            local_news_prediction,
+        )
+
+        return result
+
+    except Exception as exc:
+        # --------------------------------------------------------
+        # 10. Last-resort safety net.
+        #
+        # The verifier itself should never crash the request.
+        # --------------------------------------------------------
+        logger.exception(
+            "Offline news verification also failed: %s",
+            exc,
+        )
+
+        return {
+            "available": False,
+            "label": "Unknown",
+            "explanation": (
+                "News verification could not be completed."
+            ),
+            "sources": [],
+        }
+
+@app.get("/cache/stats")
+def cache_stats():
+    return {"geminiNewsCache": gemini_news_cache.stats()}
     
 def gemini_generate(prompt: str, request_key: Optional[str] = None):
     attempts = max(1, len(GEMINI_API_KEYS)) if not request_key else 1
@@ -1829,11 +1993,32 @@ def analyze_news(
         x for x in [headline, article_text] if x
     )[:MAX_INPUT_CHARS]
 
+   
     if len(content.strip()) < 15:
         raise HTTPException(
             status_code=400,
             detail="The supplied news content is too short for analysis.",
         )
+    # --- Phase II-C: claim extraction (must run BEFORE temporal) -----
+    structured_claim = None
+    suggested_queries: list[str] = []
+    try:
+        structured_claim = build_structured_claim(headline, article_text)
+        suggested_queries = claim_to_search_queries(structured_claim)
+    except Exception as exc:
+        logger.warning("[CLAIM] extraction failed, continuing without it: %s", exc)
+
+    # --- Phase II-E: temporal classification (depends on the above) --
+    temporal_assessment = None
+    try:
+        mentioned_dates = structured_claim.entities.dates if structured_claim else []
+        temporal_assessment = classify_currentness(
+            extracted.get("published_at"),
+            mentioned_dates,
+        )
+    except Exception as exc:
+        logger.warning("[TEMPORAL] classification failed, continuing without it: %s", exc)    
+
 
     # -----------------------------------------------------------------
     # Gather every voter's prediction FIRST, then poll once. Each voter
@@ -1909,7 +2094,16 @@ def analyze_news(
     related_sources = gemini["sources"] or [
         {"title": a["title"], "url": a["url"]} for a in related_articles
     ]
-
+    python_synthesis = None
+    try:
+        python_synthesis = synthesize(
+            poll=poll,
+            temporal=temporal_assessment.to_dict() if temporal_assessment else None,
+            clickbait=structured_claim.clickbait if structured_claim else None,
+            gemini_available=gemini["available"],
+        )
+    except Exception as exc:
+        logger.warning("[SYNTHESIS] failed, continuing without it: %s", exc)
     return {
         "success": True,
         "label": winner,
@@ -1937,6 +2131,7 @@ def analyze_news(
             "headline": headline,
             "articleUrl": article_url,
             "articleExtracted": bool(extracted["text"]),
+            "articleExtractionError": extracted.get("errorMessage"),
         },
         "webVerification": {
             "available": gemini["available"],
@@ -1946,6 +2141,12 @@ def analyze_news(
             "sources": gemini["sources"],
         },
         "relatedNews": related_sources,
+        "claim": structured_claim.to_dict() if structured_claim else None,
+        "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
+        "suggestedSearchQueries": suggested_queries,
+        "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
+
+        
     }
 
 @app.post("/analyze/review")
@@ -2175,6 +2376,16 @@ def analyze_phishing(payload: UrlPayload):
             "domainAgeDays": domain_age,
         },
     }
+
+@app.post("/analyze/claim")
+def analyze_claim(payload: ClaimPayload):
+    claim = build_structured_claim(payload.headline, payload.article_text)
+    return {
+        "success": True,
+        "claim": claim.to_dict(),
+        "suggestedSearchQueries": claim_to_search_queries(claim),
+    }
+
 @app.get("/gemini/status")
 def gemini_status():
     return {"success": True, "rotator": gemini_rotator.status()}
@@ -2212,6 +2423,12 @@ CONTENT:
                 "to enable the offline-key-free backup."
             ),
         )
+
+@app.post("/analyze/temporal")
+def analyze_temporal(payload: TemporalPayload):
+    assessment = classify_currentness(payload.published_at or None, payload.mentioned_dates)
+    return {"success": True, "temporal": assessment.to_dict()}
+    
 @app.post("/analyze/news/summary")
 def summarize_news(
     payload: SummaryPayload,
