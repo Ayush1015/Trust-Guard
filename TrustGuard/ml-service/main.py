@@ -51,7 +51,7 @@ from news_intelligence import (
     offline_news_verification,
 )
 from gemini_backup import GeminiKeyRotator, is_quota_error
-
+from adapters.model_registry import ModelAdapter, ModelRegistry
 
 # ---------------------------------------------------------------------
 # CONFIG
@@ -285,7 +285,57 @@ class ReviewPagePayload(BaseModel):
 # ---------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------
+news_registry = ModelRegistry()
 
+def predict_pretrained_item(item: dict[str, Any], content: str):
+    """Extracted from pretrained_text_predictions()'s loop body so a
+    single item can be predicted on its own — needed by both the legacy
+    poll path and the new per-model registry adapter, so there's still
+    exactly one prediction implementation."""
+    try:
+        if item["kind"] == "pipeline":
+            raw, conf = predict_model(item["model"], [content])
+        elif item["kind"] == "tfidf":
+            X = item["vectorizer"].transform([content])
+            raw, conf = predict_model(item["model"], X)
+        elif item["kind"] == "review_pipeline":
+            vectorized = item["vectorizer"].transform([content])
+            scaled = item["scaler"].transform(vectorized)
+            raw, conf = predict_model(item["model"], scaled)
+        else:
+            return None
+        if raw is None:
+            return None
+        label = news_label(raw) if item["task"] == "news" else review_label(raw)
+        if label == "Unknown":
+            return None
+        return make_prediction(item["name"], label, conf, source="pretrained")
+    except Exception as exc:
+        logger.warning("[REGISTRY] %s failed: %s", item["name"], exc)
+        return None
+
+def build_news_registry():
+    news_registry.clear()
+
+    if news_model is not None and news_vectorizer is not None:
+        news_registry.register(ModelAdapter(
+            name="Local News Model", task="news", version="tfidf-logreg",
+            predict_fn=local_news_prediction,
+        ))
+
+    for item in [p for p in pretrained_models if p["task"] == "news"]:
+        news_registry.register(ModelAdapter(
+            name=item["name"], task="news", version=item.get("kind", "pretrained"),
+            predict_fn=lambda content, _item=item: predict_pretrained_item(_item, content),
+        ))
+
+    for entry in hf_news_classifiers:
+        news_registry.register(ModelAdapter(
+            name=entry["name"], task="news", version=entry["repo_id"],
+            predict_fn=lambda content, _entry=entry: hf_news_prediction(_entry, content),
+        ))
+
+    logger.info("[REGISTRY] news registry built: %d adapters", len(news_registry.for_task("news")))
 def clean_text(value: Any) -> str:
     value = "" if value is None else str(value)
     value = re.sub(r"<[^>]+>", " ", value)
@@ -1960,6 +2010,10 @@ def analyze_review(payload: TextPayload):
         "poll": poll,
         "models": predictions,
     }
+
+@app.get("/models/registry")
+def models_registry():
+    return {"news": news_registry.as_config()}
 
 @app.post("/analyze/review/page")
 def analyze_review_page(payload: ReviewPagePayload):
