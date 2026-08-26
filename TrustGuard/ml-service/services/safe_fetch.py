@@ -1,152 +1,158 @@
-"""
-Hardens article fetching for extract_article().
+"""Fetch a URL's HTML exactly once, safely, and hand it to callers so
+extraction strategies (trafilatura, then BeautifulSoup fallback) never
+issue duplicate network requests for the same page.
 
-Fixes, in order of how they showed up in production logs:
-
-1. "invalid ZSTD file" / "empty HTML tree" — trafilatura.fetch_url()
-   negotiates Accept-Encoding itself (including zstd/br). When a
-   server mislabels its response, or the decoder isn't available, the
-   still-compressed bytes get handed to the HTML parser as text. Fix:
-   fetch with `requests`, requesting only encodings it can always
-   decode (gzip, deflate), and hand the already-decoded text straight
-   to trafilatura.extract() instead of trafilatura.fetch_url().
-
-2. 403/429 from bot-blocking sites — fails clearly and immediately
-   with a labeled reason instead of silently falling through to an
-   empty result that looks like a parser bug.
-
-3. SSRF via redirects — validate_public_url() in main.py only checked
-   the ORIGINAL url; requests follows redirects by default, so a URL
-   could 302 to an internal/private IP and bypass that check. This
-   disables automatic redirects and re-validates every hop.
+SECURITY: this module deliberately does NOT use requests' automatic
+redirect-following. `validate_public_url()` (passed in as `validate_fn`)
+blocks private/loopback/link-local IPs and localhost -- but that check is
+worthless if a URL that passes validation then 302s to
+http://169.254.169.254/ or http://localhost:8000/admin. Every redirect
+hop is re-validated here before being followed, up to MAX_REDIRECTS.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
+from urllib.parse import urljoin
 
 import requests
 
-logger = logging.getLogger("trustguard.fetch")
-
-
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MB
-REQUEST_TIMEOUT = 15
-
-SAFE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/128.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    # Deliberately NOT br/zstd: if this environment's decoder doesn't
-    # match what the server actually sends, the body gets corrupted
-    # before trafilatura ever sees it. gzip/deflate are always safe
-    # with `requests`' built-in decompression.
-    "Accept-Encoding": "gzip, deflate",
-}
-
-FETCH_ERROR_MESSAGES = {
-    "blocked": "The source blocked automated access (bot protection).",
-    "not_found": "The article page returned a 404 Not Found.",
-    "invalid_content_type": "The URL did not return an HTML page.",
-    "too_large": "The page exceeded the maximum allowed size.",
-    "network_error": "A network error occurred while fetching the page.",
-    "ssrf_blocked": "The URL or one of its redirects points to a disallowed address.",
-}
+ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 
 
 @dataclass
 class FetchResult:
-
-    html: Optional[str]
-    final_url: str
-    status_code: Optional[int]
-    error: Optional[str]
-
-    @property
-    def ok(self) -> bool:
-        return self.html is not None and self.error is None
-
-    @property
-    def error_message(self) -> Optional[str]:
-        return FETCH_ERROR_MESSAGES.get(self.error) if self.error else None
+    ok: bool
+    html: str = ""
+    status_code: Optional[int] = None
+    final_url: str = ""
+    error: Optional[str] = None
+    error_message: Optional[str] = None
 
 
-def safe_fetch_html(url: str, validate_url: Callable[[str], None]) -> FetchResult:
-    """`validate_url` should raise ValueError on an unsafe URL — reuses
-    main.py's existing validate_public_url() so there's exactly one
-    definition of "safe URL" for the initial request AND every redirect."""
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    # requests' `text` decoding already handles gzip/deflate transparently.
+    # We do NOT advertise brotli/zstd here: some servers send those even
+    # when requests can't decode them cleanly, which is what corrupted
+    # content when trafilatura's own fetcher was used directly.
+    "Accept-Encoding": "gzip, deflate",
+}
 
+
+def _read_capped(response: requests.Response, max_bytes: int) -> Optional[bytes]:
+    """Reads the response body up to max_bytes. Returns None if the body
+    exceeds the cap, so callers can reject oversized pages instead of
+    buffering an attacker-controlled amount of memory."""
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def safe_fetch_html(
+    url: str,
+    validate_fn: Callable[[str], None],
+    timeout: int = 15,
+    max_redirects: int = MAX_REDIRECTS,
+    max_bytes: int = MAX_RESPONSE_BYTES,
+) -> FetchResult:
     current_url = url
 
-    try:
-        validate_url(current_url)
-    except ValueError:
-        return FetchResult(None, current_url, None, "ssrf_blocked")
-
-    session = requests.Session()
-
-    for _ in range(MAX_REDIRECTS + 1):
+    for hop in range(max_redirects + 1):
         try:
-            response = session.get(
-                current_url,
+            validate_fn(current_url)
+        except ValueError as exc:
+            return FetchResult(
+                ok=False, final_url=current_url,
+                error="ssrf_blocked" if hop > 0 else "invalid_url",
+                error_message=str(exc),
+            )
 
-                headers=SAFE_HEADERS,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=False,
+        try:
+            response = requests.get(
+                current_url,
+                timeout=timeout,
+                headers=_HEADERS,
+                allow_redirects=False,  # we validate + follow manually
                 stream=True,
             )
+        except requests.exceptions.Timeout:
+            return FetchResult(
+                ok=False, final_url=current_url, error="timeout",
+                error_message="The page took too long to respond.",
+            )
+        except requests.exceptions.SSLError as exc:
+            return FetchResult(
+                ok=False, final_url=current_url, error="ssl_error",
+                error_message=f"SSL error: {exc}",
+            )
         except requests.exceptions.RequestException as exc:
-            logger.warning("[FETCH] Network error for %s: %s", current_url, exc)
-            return FetchResult(None, current_url, None, "network_error")
+            return FetchResult(
+                ok=False, final_url=current_url, error="fetch_failed",
+                error_message=str(exc),
+            )
 
-        if response.status_code in (301, 302, 303, 307, 308):
-            next_url = response.headers.get("Location", "")
+        # Redirect: re-validate the *destination* before following it.
+        if response.is_redirect or response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
             response.close()
-            if not next_url:
-                return FetchResult(None, current_url, response.status_code, "network_error")
-            try:
-                validate_url(next_url)
-            except ValueError:
-                logger.warning("[FETCH] Redirect to unsafe URL blocked: %s -> %s", current_url, next_url)
-                return FetchResult(None, current_url, response.status_code, "ssrf_blocked")
-            current_url = next_url
+            if not location:
+                return FetchResult(
+                    ok=False, final_url=current_url, error="redirect_without_location",
+                    error_message="Server returned a redirect with no Location header.",
+                )
+            current_url = urljoin(current_url, location)
             continue
 
-        if response.status_code in (403, 429):
+        if response.status_code >= 400:
+            error = "not_found" if response.status_code == 404 else "http_error"
             response.close()
-            logger.info("[FETCH] %s returned %s — site is blocking automated access.", current_url, response.status_code)
-            return FetchResult(None, current_url, response.status_code, "blocked")
+            return FetchResult(
+                ok=False, status_code=response.status_code, final_url=current_url,
+                error=error, error_message=f"Server returned HTTP {response.status_code}.",
+            )
 
-        if response.status_code == 404:
+        content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type and not any(content_type.startswith(ct) for ct in ALLOWED_CONTENT_TYPES):
             response.close()
-            return FetchResult(None, current_url, 404, "not_found")
+            return FetchResult(
+                ok=False, status_code=response.status_code, final_url=current_url,
+                error="unsupported_content_type",
+                error_message=f"Refusing to parse content-type '{content_type}'.",
+            )
 
-        if not response.ok:
-
-            response.close()
-            return FetchResult(None, current_url, response.status_code, "network_error")
-
-        content_type = response.headers.get("Content-Type", "")
-        if "html" not in content_type and "xml" not in content_type:
-            response.close()
-            return FetchResult(None, current_url, response.status_code, "invalid_content_type")
-
-        body = bytearray()
-        for chunk in response.iter_content(chunk_size=65536):
-            body.extend(chunk)
-            if len(body) > MAX_RESPONSE_BYTES:
-                response.close()
-                return FetchResult(None, current_url, response.status_code, "too_large")
-
-        html_text = body.decode(response.encoding or "utf-8", errors="replace")
+        raw = _read_capped(response, max_bytes)
+        status_code = response.status_code
+        encoding = response.encoding or "utf-8"
         response.close()
-        return FetchResult(html_text, current_url, response.status_code, None)
 
-    return FetchResult(None, current_url, None, "network_error")
+        if raw is None:
+            return FetchResult(
+                ok=False, status_code=status_code, final_url=current_url,
+                error="too_large",
+                error_message=f"Response exceeded the {max_bytes // (1024 * 1024)}MB size cap.",
+            )
+
+        try:
+            html = raw.decode(encoding, errors="replace")
+        except (LookupError, TypeError):
+            html = raw.decode("utf-8", errors="replace")
+
+        return FetchResult(ok=True, html=html, status_code=status_code, final_url=current_url)
+
+    return FetchResult(
+        ok=False, final_url=current_url, error="too_many_redirects",
+        error_message=f"Exceeded the {max_redirects}-redirect limit.",
+    )

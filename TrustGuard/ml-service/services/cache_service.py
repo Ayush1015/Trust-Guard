@@ -1,17 +1,24 @@
 """
-§35: Caching.
+TrustGuard cache service.
 
-In-memory, TTL-based, thread-safe-enough for a single uvicorn worker
-(a dict + a lock). This is explicitly a stand-in for Redis — the
-interface (get/set/make_key) is small on purpose so swapping the
-backend later doesn't touch any caller.
+Provides small, thread-safe, in-memory TTL caches for:
+- Gemini news-verification results
+- Search results
+- Extracted article content
 
-Short TTL by design: Gemini's job here is CURRENT web verification.
-Caching it for hours would silently make "current" claims stale,
-which is the exact failure mode §5 exists to catch. Default TTL is
-tuned for "protects against duplicate requests and burst dev testing,"
-not "reduces API calls under real traffic" — raise CACHE_TTL_SECONDS
-deliberately, with that tradeoff in mind, rather than by default.
+The cache is intentionally in-memory so it requires no Redis or other
+external infrastructure. It resets when the process restarts.
+
+TTL values are deliberately different for each cache:
+
+- Gemini verification: short TTL because verification depends on current
+  web information.
+- Search results: short TTL because search rankings/results can change.
+- Article content: longer TTL because published article text is generally
+  stable.
+
+The public interface is intentionally small so this implementation can be
+replaced by Redis later without changing callers.
 """
 
 from __future__ import annotations
@@ -23,8 +30,23 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-DEFAULT_TTL_SECONDS = 300  # 5 minutes
 
+# ---------------------------------------------------------------------------
+# Default cache configuration
+# ---------------------------------------------------------------------------
+
+GEMINI_CACHE_TTL_SECONDS = 300       # 5 minutes
+SEARCH_CACHE_TTL_SECONDS = 900       # 15 minutes
+ARTICLE_CACHE_TTL_SECONDS = 21600    # 6 hours
+
+GEMINI_CACHE_MAX_ENTRIES = 500
+SEARCH_CACHE_MAX_ENTRIES = 300
+ARTICLE_CACHE_MAX_ENTRIES = 1000
+
+
+# ---------------------------------------------------------------------------
+# Cache entry
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _Entry:
@@ -32,77 +54,272 @@ class _Entry:
     expires_at: float
 
 
+# ---------------------------------------------------------------------------
+# Generic in-memory TTL cache
+# ---------------------------------------------------------------------------
 
 class TTLCache:
-    def __init__(self, default_ttl: int = DEFAULT_TTL_SECONDS, max_entries: int = 500):
+    """
+    Thread-safe in-memory cache with expiration.
+
+    time.monotonic() is used for expiration instead of wall-clock time so
+    system clock changes cannot unexpectedly extend or shorten cache entries.
+    """
+
+    def __init__(
+        self,
+        default_ttl: int,
+        max_entries: int = 500,
+    ):
         self._store: dict[str, _Entry] = {}
         self._lock = threading.Lock()
-        self._default_ttl = default_ttl
-        self._max_entries = max_entries
+        self._default_ttl = max(0, int(default_ttl))
+        self._max_entries = max(1, int(max_entries))
+
         self.hits = 0
         self.misses = 0
 
     def get(self, key: str) -> Optional[Any]:
+        """
+        Return a cached value when it exists and has not expired.
+
+        Expired entries are removed immediately when accessed.
+        """
+
         with self._lock:
             entry = self._store.get(key)
+
             if entry is None:
                 self.misses += 1
                 return None
-            if entry.expires_at < time.monotonic():
-                del self._store[key]
+
+            if entry.expires_at <= time.monotonic():
+                self._store.pop(key, None)
                 self.misses += 1
                 return None
+
             self.hits += 1
             return entry.value
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+    def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[int] = None,
+    ) -> None:
+        """
+        Store a value with an optional per-entry TTL.
+
+        When the cache reaches its maximum size, the entries closest to
+        expiration are removed first.
+        """
+
+        ttl_seconds = (
+            self._default_ttl
+            if ttl is None
+            else max(0, int(ttl))
+        )
+
         with self._lock:
-            if len(self._store) >= self._max_entries:
+            if key not in self._store and len(self._store) >= self._max_entries:
                 self._evict_oldest_locked()
+
             self._store[key] = _Entry(
                 value=value,
-                expires_at=time.monotonic() + (ttl if ttl is not None else self._default_ttl),
+                expires_at=time.monotonic() + ttl_seconds,
             )
 
+    def delete(self, key: str) -> None:
+        """Remove one cache entry if it exists."""
 
-    def _evict_oldest_locked(self, count: int = 50) -> None:
-        # Cheapest correct eviction for a dict this small; swap for an
-        # OrderedDict/LRU if entry counts grow much past a few thousand.
-        oldest = sorted(self._store.items(), key=lambda kv: kv[1].expires_at)[:count]
-        for key, _ in oldest:
+        with self._lock:
             self._store.pop(key, None)
 
-    def stats(self) -> dict:
+    def clear(self) -> None:
+        """Remove every entry from the cache."""
+
         with self._lock:
+            self._store.clear()
+
+    def _evict_oldest_locked(self, count: int = 50) -> None:
+        """
+        Remove entries that expire soonest.
+
+        This is intentionally simple because the configured caches are small.
+        """
+
+        if not self._store:
+            return
+
+        remove_count = min(count, len(self._store))
+
+        oldest = sorted(
+            self._store.items(),
+            key=lambda item: item[1].expires_at,
+        )[:remove_count]
+
+        for key, _entry in oldest:
+            self._store.pop(key, None)
+
+    def stats(self) -> dict[str, Any]:
+        """Return cache usage statistics."""
+
+        with self._lock:
+            total = self.hits + self.misses
+
             return {
                 "entries": len(self._store),
                 "hits": self.hits,
                 "misses": self.misses,
-                "hit_rate": round(self.hits / (self.hits + self.misses), 3) if (self.hits + self.misses) else 0.0,
+                "hit_rate": (
+                    round(self.hits / total, 3)
+                    if total
+                    else 0.0
+                ),
+                "ttlSeconds": self._default_ttl,
+                "maxEntries": self._max_entries,
             }
 
+
+# ---------------------------------------------------------------------------
+# Cache-key normalization
+# ---------------------------------------------------------------------------
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def normalize_for_cache(text: str) -> str:
-    """Collapses whitespace and lowercases so 'India Raises Sugar Prices'
-    and 'india  raises sugar prices' hit the same cache entry. Does NOT
-    touch punctuation/wording — this is intentionally conservative to
-    avoid merging genuinely different claims into one cached verdict."""
-    return _WHITESPACE_RE.sub(" ", (text or "").strip().lower())
+    """
+    Normalize text conservatively for cache-key generation.
+
+    Whitespace is collapsed and text is lowercased.
+
+    Punctuation and wording are intentionally preserved so genuinely
+    different claims are not accidentally merged into one cached result.
+    """
+
+    return _WHITESPACE_RE.sub(
+        " ",
+        (text or "").strip().lower(),
+    )
 
 
-def make_gemini_cache_key(headline: str, article_url: str, article_text: str) -> str:
-    normalized = "|".join([
-        normalize_for_cache(headline),
+# ---------------------------------------------------------------------------
+# Gemini cache key
+# ---------------------------------------------------------------------------
 
-        normalize_for_cache(article_url),
-        normalize_for_cache(article_text)[:4000],  # cap: full articles shouldn't dominate hashing cost
-    ])
-    return "gemini:news:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+def make_gemini_cache_key(
+    headline: str,
+    article_url: str,
+    article_text: str,
+) -> str:
+    """
+    Create a stable cache key for Gemini news verification.
+
+    Only the first 4,000 normalized article characters are included in the
+    hash to prevent very large articles from unnecessarily increasing the
+    hashing workload.
+    """
+
+    normalized = "|".join(
+        [
+            normalize_for_cache(headline),
+            normalize_for_cache(article_url),
+            normalize_for_cache(article_text)[:4000],
+        ]
+    )
+
+    digest = hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+    return f"gemini:news:{digest}"
 
 
-# Module-level singleton — one cache per process, same pattern as the
-# existing MODEL_ERRORS/MODEL_LOAD_EVENTS globals in main.py.
-gemini_news_cache = TTLCache(default_ttl=DEFAULT_TTL_SECONDS)
+# ---------------------------------------------------------------------------
+# Search-result cache key
+# ---------------------------------------------------------------------------
+
+def make_search_cache_key(
+    query: str,
+    max_results: int,
+) -> str:
+    """
+    Create a stable cache key for a search query.
+
+    max_results is included because requesting 5 results and requesting
+    20 results should not share the same cached response.
+    """
+
+    normalized_query = normalize_for_cache(query)
+
+    raw = f"{normalized_query}|{int(max_results)}"
+
+    digest = hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+    return f"search:{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Article-content cache key
+# ---------------------------------------------------------------------------
+
+def make_article_cache_key(url: str) -> str:
+    """Create a stable cache key for extracted article content."""
+
+    normalized_url = normalize_for_cache(url)
+
+    digest = hashlib.sha256(
+        normalized_url.encode("utf-8")
+    ).hexdigest()
+
+    return f"article:{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Named cache instances
+# ---------------------------------------------------------------------------
+
+# Gemini verification must remain relatively fresh because its purpose is
+# current web verification.
+gemini_news_cache = TTLCache(
+    default_ttl=GEMINI_CACHE_TTL_SECONDS,
+    max_entries=GEMINI_CACHE_MAX_ENTRIES,
+)
+
+
+# Search results can be reused briefly to avoid repeatedly querying external
+# search providers for identical claims.
+search_results_cache = TTLCache(
+    default_ttl=SEARCH_CACHE_TTL_SECONDS,
+    max_entries=SEARCH_CACHE_MAX_ENTRIES,
+)
+
+
+# Article content generally changes less often than search results, so it can
+# safely use a longer TTL.
+article_cache = TTLCache(
+    default_ttl=ARTICLE_CACHE_TTL_SECONDS,
+    max_entries=ARTICLE_CACHE_MAX_ENTRIES,
+)
+
+
+# ---------------------------------------------------------------------------
+# Combined cache statistics
+# ---------------------------------------------------------------------------
+
+def cache_stats_all() -> dict[str, Any]:
+    """
+    Return statistics for all TrustGuard caches.
+
+    This is suitable for exposing through a diagnostic endpoint such as
+    GET /cache/stats.
+    """
+
+    return {
+        "geminiNewsCache": gemini_news_cache.stats(),
+        "searchResultsCache": search_results_cache.stats(),
+        "articleCache": article_cache.stats(),
+    }

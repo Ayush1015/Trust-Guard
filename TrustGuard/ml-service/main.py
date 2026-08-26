@@ -57,6 +57,7 @@ from news_intelligence import (
     extractive_summary,
     free_translate,
     offline_news_verification,
+    collect_related_articles,
 )
 from gemini_backup import GeminiKeyRotator, is_quota_error
 from adapters.model_registry import ModelAdapter, ModelRegistry
@@ -64,7 +65,9 @@ from services.claim_service import build_structured_claim, claim_to_search_queri
 from services.temporal_service import classify_currentness
 from services.synthesis_service import synthesize
 from services.cache_service import gemini_news_cache, make_gemini_cache_key
-
+from services.clustering_service import (
+    ArticleForClustering, cluster_articles, independence_summary,
+)
 BASE_DIR = Path(__file__).resolve().parent
 
 logging.basicConfig(
@@ -1878,7 +1881,8 @@ UNCERTAINTY: important limitations
 
 @app.get("/cache/stats")
 def cache_stats():
-    return {"geminiNewsCache": gemini_news_cache.stats()}
+    from services.cache_service import cache_stats_all
+    return cache_stats_all()
     
 def gemini_generate(prompt: str, request_key: Optional[str] = None):
     attempts = max(1, len(GEMINI_API_KEYS)) if not request_key else 1

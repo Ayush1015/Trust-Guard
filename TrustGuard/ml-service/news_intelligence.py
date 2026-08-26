@@ -45,9 +45,19 @@ import re
 import time
 from collections import Counter
 from typing import Any, Callable, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, unquote, urlparse
-
+from adapters.search_adapter import DuckDuckGoSearchAdapter, SearchResult, SearchService
+from services.cache_service import (
+    article_cache,
+    make_article_cache_key,
+    make_search_cache_key,
+    search_results_cache,
+)
+ 
 import requests
+_search_service = SearchService([DuckDuckGoSearchAdapter()])
+ 
 
 logger = logging.getLogger("trustguard.news_intel")
 
@@ -464,3 +474,116 @@ def offline_news_verification(
         "sources": sources,
         "mode": "offline",
     }
+
+def collect_related_articles(
+    queries: list[str], primary_label: str, max_results: int = 5
+) -> dict:
+    """Runs each suggested search query and returns a de-duplicated list
+    of related links. This is the function main.py's analyze_news() calls
+    as `collect_related_articles(...)` but never imported -- that missing
+    import was one of the two reasons the service failed to start."""
+    seen_urls: set[str] = set()
+    combined: list[dict] = []
+
+    for query in queries[:3]:
+        for result in _cached_search(query, max_results):
+            if result.url in seen_urls:
+                continue
+            seen_urls.add(result.url)
+            combined.append({"title": result.title, "url": result.url, "query": query})
+
+    return {
+        "primaryLabel": primary_label,
+        "queriesUsed": queries[:3],
+        "articles": combined[:10],
+    }
+
+
+def _run_search(query: str, max_results: int) -> list:
+    """Calls whichever search method the installed SearchService actually
+    exposes. This project has had two shapes of SearchService in flight
+    at once (a simple .search(query, max_results) and a
+    .multi_query_search(...) that takes query variants) -- calling the
+    wrong one by name doesn't raise until a real request hits it, so this
+    checks what's actually there instead of assuming.
+ 
+    If your SearchService only implements multi_query_search(), it is
+    called with a single-item variant list; if it returns per-variant
+    grouping rather than a flat list, this flattens/dedupes by URL.
+    """
+    if hasattr(_search_service, "search"):
+        return _search_service.search(query, max_results=max_results)
+ 
+    if hasattr(_search_service, "multi_query_search"):
+        raw = _search_service.multi_query_search([query], max_results=max_results)
+        return _flatten_search_results(raw)
+ 
+    raise AttributeError(
+        "SearchService has neither .search() nor .multi_query_search() -- "
+        "news_intelligence.py needs updating to match the installed adapter."
+    )
+ 
+ 
+def _flatten_search_results(raw) -> list:
+    """Normalizes whatever multi_query_search() returns (a flat list, a
+    list of lists, or a dict keyed by query variant) into one de-duplicated
+    flat list of results with a .url attribute, since every caller here
+    just wants "the results", not per-variant grouping."""
+    flat = []
+    if isinstance(raw, dict):
+        for values in raw.values():
+            flat.extend(values or [])
+    elif raw and isinstance(raw[0], (list, tuple)):
+        for values in raw:
+            flat.extend(values or [])
+    else:
+        flat = list(raw or [])
+ 
+    seen_urls = set()
+    deduped = []
+    for item in flat:
+        url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped.append(item)
+    return deduped
+ 
+ 
+def _cached_search(query: str, max_results: int) -> list[SearchResult]:
+    """Wraps SearchService.search() with a short-TTL cache so repeated
+    claims (or a user retrying the same check) don't re-hit DuckDuckGo
+    every time. Cache misses/empty results are not cached, so a
+    transient search-provider outage doesn't get "stuck" as empty."""
+    cache_key = make_search_cache_key(query, max_results)
+    cached = search_results_cache.get(cache_key)
+    if cached is not None:
+        return cached
+ 
+    results = _run_search(query, max_results)
+    if results:
+        search_results_cache.set(cache_key, results)
+    return results
+ 
+ 
+def _cached_extract(url: str, extract_article_fn: Callable) -> Optional[dict]:
+    """Wraps an article-extraction call with a long-TTL cache, since
+    published article text is effectively immutable. Extraction
+    failures (falsy/errored results) are not cached, so a page that's
+    temporarily down gets retried on the next request instead of being
+    permanently marked as unfetchable."""
+    cache_key = make_article_cache_key(url)
+    cached = article_cache.get(cache_key)
+    if cached is not None:
+        return cached
+ 
+    extracted = extract_article_fn(url)
+    if extracted and extracted.get("text") and not extracted.get("error"):
+        article_cache.set(cache_key, extracted)
+    return extracted
+ 
+_SENSATIONAL_WORDS = (
+    "shocking", "unbelievable", "destroys", "slams", "exposed",
+    "secret", "miracle", "banned", "outrage", "you won't believe",
+)
+ 
