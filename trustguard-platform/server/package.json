@@ -1,6 +1,6 @@
 {
   "name": "trustguard-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "API Gateway for TrustGuard Digital Trust and Misinformation Detection platform",
   "main": "src/index.js",
   "type": "module",
@@ -10,12 +10,12 @@
     "test": "node tests/analyze.test.js"
   },
   "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^11.3.0",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
