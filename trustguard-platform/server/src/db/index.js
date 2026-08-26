@@ -1,9 +1,47 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const db = new Database(path.join(__dirname, 'trustguard.db'));
+
+// Create native SQLite DatabaseSync instance
+const rawDb = new DatabaseSync(path.join(__dirname, 'trustguard.db'));
+
+// Compatibility wrapper for better-sqlite3
+const db = {
+  pragma(str) {
+    if (str.includes('=')) {
+      rawDb.exec(`PRAGMA ${str}`);
+    } else {
+      return rawDb.prepare(`PRAGMA ${str}`).get();
+    }
+  },
+
+  exec(sql) {
+    return rawDb.exec(sql);
+  },
+
+  prepare(sql) {
+    const stmt = rawDb.prepare(sql);
+    return {
+      run(...args) {
+        const result = stmt.run(...args);
+        return {
+          changes: result.changes,
+          lastInsertRowid: typeof result.lastInsertRowid === 'bigint'
+            ? Number(result.lastInsertRowid)
+            : result.lastInsertRowid
+        };
+      },
+      get(...args) {
+        return stmt.get(...args);
+      },
+      all(...args) {
+        return stmt.all(...args);
+      }
+    };
+  }
+};
 
 db.pragma('journal_mode = WAL');
 
