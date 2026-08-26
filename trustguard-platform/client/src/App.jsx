@@ -13,6 +13,8 @@ import NewsInput from "./components/NewsInput";
 import ReviewInput from "./components/ReviewInput";
 import PhishingInput from "./components/PhishingInput";
 import ResultCard from "./components/ResultCard";
+import EvidenceDashboard from "./components/EvidenceDashboard";
+import LiveAnalysisProgress from "./components/LiveAnalysisProgress";
 
 const API_BASE_URL = (
   import.meta.env.VITE_API_URL ||
@@ -79,9 +81,9 @@ function hasInput(tab, payload) {
   if (tab === "news") {
     return Boolean(
       payload.headline ||
-        payload.article_url ||
-        payload.article_text ||
-        payload.text
+      payload.article_url ||
+      payload.article_text ||
+      payload.text
     );
   }
 
@@ -289,9 +291,9 @@ async function request(
     if (!response.ok) {
       throw new Error(
         data?.error?.message ||
-          data?.detail ||
-          data?.message ||
-          `Request failed with HTTP ${response.status}.`
+        data?.detail ||
+        data?.message ||
+        `Request failed with HTTP ${response.status}.`
       );
     }
 
@@ -386,7 +388,7 @@ function App() {
 
   const controllerRef = useRef(null);
   const mountedRef = useRef(true);
-
+  const [liveMode, setLiveMode] = useState(false);
   const saveGeminiKey = useCallback(() => {
     const key = clean(geminiApiKey);
     if (!key) return;
@@ -872,7 +874,14 @@ function App() {
             activeTab={activeTab}
             setActiveTab={changeTab}
           />
-
+          {activeTab === "news" && (
+  <div className="form-check form-switch mb-2">
+    <input className="form-check-input" type="checkbox" id="live-mode" checked={liveMode} onChange={(e) => setLiveMode(e.target.checked)} />
+    <label className="form-check-label small" htmlFor="live-mode" style={{ color: "var(--text-secondary)" }}>
+      Live analysis (show progress in real time)
+    </label>
+  </div>
+)}
           <div className="mt-4">
             {activeTab === "news" && (
               <NewsInput
@@ -923,8 +932,21 @@ function App() {
                   className="small mt-1"
                   style={{ color: UI.muted }}
                 >
-                  {activeTab === "news"
-                    ? "Polling compatible news models and optional web evidence..."
+                  {activeTab === "news" && liveMode ? (
+                    <LiveAnalysisProgress
+                      streamUrl={`${API_BASE_URL}/analyze/news/stream`}
+                      payload={lastPayload}
+                      geminiApiKey={geminiApiKey}
+                      onComplete={(finalResult) => {
+                        setResult(finalResult);
+                        setLoading(false);
+                      }}
+                      onError={(message) => {
+                        setError(message);
+                        setLoading(false);
+                      }}
+                    />
+                  )
                     : activeTab === "review"
                       ? "Polling compatible review models..."
                       : "Analyzing URL features and phishing models..."}
@@ -996,7 +1018,9 @@ function App() {
                 type={activeTab}
               />
             </div>
-
+            {activeTab === "news" && (
+              <EvidenceDashboard result={result} />
+            )}
             {/* POLL */}
             {result.poll && (
               <SectionCard
@@ -1144,7 +1168,7 @@ function App() {
                                 }}
                               >
                                 {model.confidence !=
-                                null
+                                  null
                                   ? `${model.confidence}%`
                                   : "N/A"}
                               </td>
@@ -1190,7 +1214,7 @@ function App() {
 
                     {result.webVerification.vote &&
                       result.webVerification.vote !==
-                        "Unknown" && (
+                      "Unknown" && (
                         <ToneBadge
                           tone={labelTone(
                             result.webVerification.vote
@@ -1204,20 +1228,20 @@ function App() {
 
                   {result.webVerification
                     .explanation && (
-                    <p
-                      className="mb-0"
-                      style={{
-                        color: UI.muted,
-                        lineHeight: 1.7,
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      {
-                        result.webVerification
-                          .explanation
-                      }
-                    </p>
-                  )}
+                      <p
+                        className="mb-0"
+                        style={{
+                          color: UI.muted,
+                          lineHeight: 1.7,
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
+                        {
+                          result.webVerification
+                            .explanation
+                        }
+                      </p>
+                    )}
                 </SectionCard>
               )}
 

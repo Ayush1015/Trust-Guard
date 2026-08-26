@@ -7,7 +7,8 @@ import {
   analyzePhishing,
   translateNews,
   summarizeNews,
-  analysisHealth
+  analysisHealth,
+  analyzeNewsStream
 } from '../controllers/analyzeController.js';
 
 import {
@@ -103,5 +104,5 @@ router.get(
   analysisHealth
 );
 
-
+router.post('/analyze/news/stream', analyzeNewsStream);
 export default router;

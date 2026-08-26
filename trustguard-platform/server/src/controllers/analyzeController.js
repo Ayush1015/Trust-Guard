@@ -1064,3 +1064,41 @@ export const analysisHealth = async (
     });
   }
 };
+
+export const analyzeNewsStream = async (req, res) => {
+  const mlServiceUrl = getMLServiceUrl();
+  try {
+    const upstream = await fetch(`${mlServiceUrl}/analyze/news/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(process.env.ML_SERVICE_TOKEN ? { 'X-ML-Service-Token': process.env.ML_SERVICE_TOKEN } : {}),
+      },
+      body: JSON.stringify(req.body || {}),
+    });
+
+    res.status(upstream.status);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    if (!upstream.body) { res.end(); return; }
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(decoder.decode(value, { stream: true }));
+    }
+    res.end();
+  } catch (error) {
+    console.error('Error in analyzeNewsStream:', error);
+    if (!res.headersSent) {
+      res.status(503).json({ error: { message: 'TrustGuard ML service is unavailable.' } });
+    } else {
+      res.end();
+    }
+  }
+};

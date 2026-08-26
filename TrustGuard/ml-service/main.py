@@ -31,7 +31,15 @@ from urllib.parse import urlparse
 import joblib
 import numpy as np
 import requests
+import hashlib
+import time
+import uuid
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from adapters.search_adapter import DuckDuckGoSearchAdapter, SearchService, SearchResult
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from services.safe_fetch import safe_fetch_html
@@ -56,9 +64,6 @@ from services.claim_service import build_structured_claim, claim_to_search_queri
 from services.temporal_service import classify_currentness
 from services.synthesis_service import synthesize
 from services.cache_service import gemini_news_cache, make_gemini_cache_key
-# ---------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -132,7 +137,11 @@ gemini_rotator = GeminiKeyRotator(GEMINI_API_KEYS, cooldown_seconds=90)
 # WHOIS domain-age lookups are a real network call with real latency, so
 # they stay opt-in rather than firing on every phishing check by default.
 ENABLE_DOMAIN_AGE_LOOKUP = os.getenv("ENABLE_DOMAIN_AGE_LOOKUP", "false").lower() == "true"
+ENABLE_WEB_SEARCH_VERIFICATION = os.getenv("ENABLE_WEB_SEARCH_VERIFICATION", "false").lower() == "true"
+MAX_SEARCH_ARTICLES_TO_FETCH = int(os.getenv("MAX_SEARCH_ARTICLES_TO_FETCH", "6"))
+SEARCH_FETCH_WORKERS = int(os.getenv("SEARCH_FETCH_WORKERS", "4"))
 
+_search_service = SearchService([DuckDuckGoSearchAdapter()])
 CORS_ORIGINS = [
     x.strip()
     for x in os.getenv(
@@ -185,9 +194,6 @@ PRETRAINED_DIR = (
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------------------------------------
-# GLOBAL STATE
-# ---------------------------------------------------------------------
 
 news_model: Any = None
 news_vectorizer: Any = None
@@ -230,9 +236,6 @@ HF_NEWS_MODEL_IDS = [
     if x.strip()
 ]
 hf_news_classifiers: list[dict[str, Any]] = []
-# ---------------------------------------------------------------------
-# APP
-# ---------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -254,9 +257,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------
-# SCHEMAS
-# ---------------------------------------------------------------------
 
 class NewsPayload(BaseModel):
     text: str = Field(default="", max_length=100_000)
@@ -292,11 +292,16 @@ class TemporalPayload(BaseModel):
     published_at: str = Field(default="")
     mentioned_dates: list[str] = Field(default_factory=list)
 
+class ClusterArticleInput(BaseModel):
+    id: str
+    url: str
+    domain: str = ""
+    title: str = ""
+
+class ClusterPayload(BaseModel):
+    articles: list[ClusterArticleInput] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------
 news_registry = ModelRegistry()
 
 def predict_pretrained_item(item: dict[str, Any], content: str):
@@ -402,9 +407,6 @@ def validate_public_url(url: str):
 
     return parsed
 
-# ---------------------------------------------------------------------
-# MODEL LOADING
-# ---------------------------------------------------------------------
 
 def record_error(message: str):
     MODEL_ERRORS.append(message)
@@ -949,9 +951,6 @@ def load_all_models():
         len(hf_news_classifiers),
     )
 
-# ---------------------------------------------------------------------
-# LABELS / PREDICTIONS
-# ---------------------------------------------------------------------
 
 def news_label(value: Any) -> str:
     v = str(value).strip().lower()
@@ -1117,9 +1116,6 @@ def pretrained_text_predictions(task: str, content: str):
 
     return results
 
-# ---------------------------------------------------------------------
-# PHISHING URL FEATURES
-# ---------------------------------------------------------------------
 
 SUSPICIOUS_KEYWORDS = (
     "login", "signin", "sign-in", "verify", "verification",
@@ -1339,9 +1335,6 @@ def pretrained_phishing_predictions(url: str):
             results.append(result)
     return results
 
-# ---------------------------------------------------------------------
-# BERTPHISH
-# ---------------------------------------------------------------------
 
 def bertphish_prediction(url: str):
     if bertphish_model is None or bertphish_tokenizer is None:
@@ -1474,9 +1467,26 @@ def hf_news_predictions(content: str):
         if result:
             results.append(result)
     return results
-# ---------------------------------------------------------------------
-# MODEL POLL
-# ---------------------------------------------------------------------
+
+def registry_result_to_poll_dict(result: Any) -> Optional[dict[str, Any]]:
+    """Convert a registry result into the prediction shape used by model_poll()."""
+    if result is None:
+        return None
+
+    status = getattr(result, "status", None)
+    label = getattr(result, "label", None)
+    model = getattr(result, "model", None)
+    confidence = getattr(result, "confidence", None)
+
+    if status != "success" or not model or label in {None, "", "Unknown"}:
+        return None
+
+    return make_prediction(
+        str(model),
+        str(label),
+        confidence,
+        source="registry",
+    )
 
 def model_poll(predictions: list[dict[str, Any]], task: str):
     valid = [
@@ -1531,10 +1541,6 @@ def model_poll(predictions: list[dict[str, Any]], task: str):
         "models": valid,
         "task": task,
     }
-
-# ---------------------------------------------------------------------
-# ARTICLE EXTRACTION
-# ---------------------------------------------------------------------
 
 
 def extract_article(url: str) -> dict[str, Any]:
@@ -1598,9 +1604,6 @@ def extract_article(url: str) -> dict[str, Any]:
             "error": "parse_error", "errorMessage": "The page could not be parsed.",
         }
 
-# ---------------------------------------------------------------------
-# GEMINI
-# ---------------------------------------------------------------------
 def get_gemini_client(request_key: Optional[str] = None):
     """Returns (client, key_used). key_used is None when request_key was
     supplied (per-user keys aren't tracked by the rotator/cooldown --
@@ -1679,12 +1682,10 @@ def gemini_news_check(
     - Falls back to local Python verification when Gemini is unavailable.
     """
 
-    # ------------------------------------------------------------
     # 1. Cache only requests using the server's shared API keys.
     #
     # A user-provided key has its own quota, so its result must not
     # be shared with other users.
-    # ------------------------------------------------------------
     cache_key = None
 
     if not request_key:
@@ -1700,9 +1701,7 @@ def gemini_news_check(
             logger.info("[CACHE] Gemini news check cache hit.")
             return cached
 
-    # ------------------------------------------------------------
     # 2. Build the verification prompt.
-    # ------------------------------------------------------------
     prompt = f"""
 You are TrustGuard's independent news verification engine.
 
@@ -1729,21 +1728,17 @@ CLAIM: main claim being checked
 UNCERTAINTY: important limitations
 """
 
-    # ------------------------------------------------------------
     # 3. Determine how many keys we can try.
     #
     # For a user-provided key, only that key is allowed.
     # For server keys, rotate through available keys.
-    # ------------------------------------------------------------
     attempts = (
         max(1, len(GEMINI_API_KEYS))
         if not request_key
         else 1
     )
 
-    # ------------------------------------------------------------
     # 4. Try Gemini.
-    # ------------------------------------------------------------
     for _attempt in range(attempts):
         client, key_used = get_gemini_client(request_key)
 
@@ -1783,9 +1778,7 @@ UNCERTAINTY: important limitations
                 getattr(response, "text", "") or ""
             ).strip()
 
-            # ----------------------------------------------------
             # 5. Extract the normalized verdict.
-            # ----------------------------------------------------
             match = re.search(
                 r"LABEL\s*:\s*(REAL|FAKE|UNKNOWN)",
                 output.upper(),
@@ -1805,11 +1798,9 @@ UNCERTAINTY: important limitations
                 "sources": extract_grounding_sources(response),
             }
 
-            # ----------------------------------------------------
             # 6. Cache ONLY successful server/shared-key results.
             #
             # Never cache results generated using a user's own key.
-            # ----------------------------------------------------
             if cache_key:
                 gemini_news_cache.set(
                     cache_key,
@@ -1824,9 +1815,7 @@ UNCERTAINTY: important limitations
 
         except Exception as exc:
 
-            # ----------------------------------------------------
             # 7. Rotate server keys when quota is exhausted.
-            # ----------------------------------------------------
             if key_used and is_quota_error(exc):
                 logger.warning(
                     "Gemini key exhausted, rotating: %s",
@@ -1839,11 +1828,9 @@ UNCERTAINTY: important limitations
 
                 continue
 
-            # ----------------------------------------------------
             # 8. Non-quota error.
             #
             # Don't cache it. Fall back to the local verifier.
-            # ----------------------------------------------------
             logger.warning(
                 "Gemini news check failed, "
                 "falling back to offline verification: %s",
@@ -1852,12 +1839,10 @@ UNCERTAINTY: important limitations
 
             break
 
-    # ------------------------------------------------------------
     # 9. Gemini unavailable.
     #
     # The local verifier should still produce a verdict rather
     # than returning "Gemini unavailable".
-    # ------------------------------------------------------------
     logger.info(
         "Gemini unavailable for news verification -- "
         "using offline Python fallback."
@@ -1874,11 +1859,9 @@ UNCERTAINTY: important limitations
         return result
 
     except Exception as exc:
-        # --------------------------------------------------------
         # 10. Last-resort safety net.
         #
         # The verifier itself should never crash the request.
-        # --------------------------------------------------------
         logger.exception(
             "Offline news verification also failed: %s",
             exc,
@@ -1931,9 +1914,247 @@ def gemini_generate(prompt: str, request_key: Optional[str] = None):
         status_code=503,
         detail=f"All configured Gemini keys are currently rate-limited: {last_error}",
     )
-# ---------------------------------------------------------------------
-# ENDPOINTS
-# ---------------------------------------------------------------------
+
+def sse_event(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def stream_news_analysis(headline: str, article_url: str, article_text: str, request_key: Optional[str]):
+    """
+    §21/§24: live progress for a news analysis, as a generator of SSE
+    frames. Calls the SAME functions analyze_news() uses — this is
+    intentionally NOT a refactor of that endpoint (see rationale above
+    the code block in the response this came with). Any bug here
+    cannot affect POST /analyze/news, since that code path is untouched.
+    """
+    analysis_id = "TG-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-" + uuid.uuid4().hex[:8].upper()
+    started = time.perf_counter()
+
+    yield sse_event("analysis_started", {"analysisId": analysis_id})
+
+    try:
+        headline = clean_text(headline)
+        article_url = clean_text(article_url)
+        article_text = clean_text(article_text)
+
+        extracted = {"title": "", "text": "", "published_at": None}
+        if article_url:
+            try:
+                validate_public_url(article_url)
+                article_url = normalize_url(article_url)
+            except ValueError as exc:
+                yield sse_event("error", {"stage": "url_validation", "message": str(exc)})
+                yield sse_event("analysis_completed", {"analysisId": analysis_id, "status": "FAILED"})
+                return
+
+            yield sse_event("article_extraction_started", {"url": article_url})
+            extracted = extract_article(article_url)
+            if extracted.get("error"):
+                yield sse_event("article_extraction_failed", {"url": article_url, "reason": extracted.get("errorMessage")})
+            else:
+                yield sse_event("article_extraction_completed", {"url": article_url, "titleFound": bool(extracted.get("title"))})
+
+            if not headline:
+                headline = extracted["title"]
+            if not article_text:
+                article_text = extracted["text"]
+
+        content = "\n".join(x for x in [headline, article_text] if x)[:MAX_INPUT_CHARS]
+        if len(content.strip()) < 15:
+            yield sse_event("error", {"stage": "input_validation", "message": "Supplied content is too short for analysis."})
+            yield sse_event("analysis_completed", {"analysisId": analysis_id, "status": "FAILED"})
+            return
+
+        # --- Claim extraction --------------------------------------------
+        yield sse_event("claim_extraction_started", {})
+        structured_claim = None
+        suggested_queries: list[str] = []
+        try:
+            structured_claim = build_structured_claim(headline, article_text)
+            suggested_queries = claim_to_search_queries(structured_claim)
+            yield sse_event("claim_extracted", {"claim": structured_claim.to_dict()})
+        except Exception as exc:
+            logger.warning("[STREAM] claim extraction failed: %s", exc)
+            yield sse_event("claim_extraction_failed", {"message": str(exc)})
+
+        # --- Primary-content model poll (Level 1, §16) --------------------
+        predictions = []
+
+        yield sse_event("model_started", {"model": "Local News Model"})
+        local = local_news_prediction(content)
+        if local:
+            predictions.append(local)
+            yield sse_event("model_completed", {"model": "Local News Model", "label": local["label"], "confidence": local["confidence"]})
+        else:
+            yield sse_event("model_unavailable", {"model": "Local News Model"})
+
+        for item in [p for p in pretrained_models if p["task"] == "news"]:
+            yield sse_event("model_started", {"model": item["name"]})
+            result = predict_pretrained_item(item, content)
+            if result:
+                predictions.append(result)
+                yield sse_event("model_completed", {"model": item["name"], "label": result["label"], "confidence": result["confidence"]})
+            else:
+                yield sse_event("model_unavailable", {"model": item["name"]})
+
+        for entry in hf_news_classifiers:
+            yield sse_event("model_started", {"model": entry["name"]})
+            result = hf_news_prediction(entry, content)
+            if result:
+                predictions.append(result)
+                yield sse_event("model_completed", {"model": entry["name"], "label": result["label"], "confidence": result["confidence"]})
+            else:
+                yield sse_event("model_unavailable", {"model": entry["name"]})
+
+        yield sse_event("model_started", {"model": "Gemini + Google Search"})
+        gemini = gemini_news_check(headline, article_url, article_text, request_key)
+        if gemini["label"] in {"Real", "Fake"}:
+            predictions.append(make_prediction("Gemini + Google Search", gemini["label"], None, source="gemini"))
+            yield sse_event("model_completed", {"model": "Gemini + Google Search", "label": gemini["label"], "confidence": None})
+        else:
+            yield sse_event("model_unavailable", {"model": "Gemini + Google Search", "reason": gemini.get("explanation")})
+
+        poll = model_poll(predictions, "Fake News")
+        yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
+
+        # --- Temporal ------------------------------------------------------
+        temporal_assessment = None
+        try:
+            mentioned_dates = structured_claim.entities.dates if structured_claim else []
+            temporal_assessment = classify_currentness(extracted.get("published_at"), mentioned_dates)
+            yield sse_event("temporal_classified", {"temporal": temporal_assessment.to_dict()})
+        except Exception as exc:
+            logger.warning("[STREAM] temporal classification failed: %s", exc)
+
+        # --- Search + per-article ML + clustering (§10/§11/§13) -------------
+        related_evidence = {"enabled": False, "articles": [], "clusters": [], "summary": None}
+        if ENABLE_WEB_SEARCH_VERIFICATION and suggested_queries:
+            yield sse_event("search_started", {"queries": suggested_queries})
+            try:
+                search_results = _search_service.multi_query_search(suggested_queries, max_results_per_query=6)
+                search_results = search_results[:MAX_SEARCH_ARTICLES_TO_FETCH]
+                yield sse_event("search_completed", {"resultsFound": len(search_results)})
+            except Exception as exc:
+                search_results = []
+                yield sse_event("search_failed", {"message": str(exc)})
+
+            fetched = []
+            for result in search_results:
+                yield sse_event("article_found", {"url": result.url, "domain": result.domain})
+                article_extracted = extract_article(result.url)
+                if article_extracted.get("error") or not article_extracted.get("text"):
+                    yield sse_event("article_extraction_failed", {"url": result.url, "reason": article_extracted.get("errorMessage")})
+                    continue
+
+                article_id = hashlib.sha256(result.url.encode()).hexdigest()[:12]
+                entry = {
+                    "id": article_id, "url": result.url, "domain": result.domain,
+                    "title": article_extracted.get("title") or result.title,
+                    "text": article_extracted.get("text"),
+                    "publishedAt": article_extracted.get("published_at"),
+                }
+                yield sse_event("article_extracted", {"url": result.url, "id": article_id})
+                yield sse_event("article_analysis_started", {"id": article_id, "url": result.url})
+
+                registry_results = news_registry.run("news", entry["text"])
+                for r in registry_results:
+                    yield sse_event(
+                        "model_completed" if r.status == "success" else "model_unavailable",
+                        {"model": r.model, "articleId": article_id, "label": r.label, "confidence": r.confidence},
+                    )
+                article_predictions = [p for p in (registry_result_to_poll_dict(r) for r in registry_results) if p]
+                article_poll = model_poll(article_predictions, "Article ML Poll")
+                entry["mlPoll"] = {
+                    "winner": article_poll["winner"], "votes": article_poll["votes"],
+                    "totalVotes": article_poll["totalVotes"], "confidence": article_poll["confidence"],
+                }
+                entry["articleLabelAgreement"] = (
+                    "INSUFFICIENT" if article_poll["winner"] == "Unknown"
+                    else "MATCHES_PRIMARY" if article_poll["winner"] == poll["winner"]
+                    else "DIFFERS_FROM_PRIMARY"
+                )
+                yield sse_event("article_analyzed", {
+                    "id": article_id, "url": result.url,
+                    "winner": article_poll["winner"], "agreement": entry["articleLabelAgreement"],
+                })
+                fetched.append(entry)
+
+            yield sse_event("source_clustering_started", {})
+            cluster_inputs = [ArticleForClustering(id=a["id"], url=a["url"], domain=a["domain"], title=a["title"]) for a in fetched]
+            clusters = cluster_articles(cluster_inputs)
+            summary = independence_summary(clusters)
+            yield sse_event("source_cluster_created", {"clusterCount": len(clusters), "totalArticles": summary["totalArticles"]})
+
+            related_evidence = {
+                "enabled": True, "articlesFound": len(search_results), "articlesExtracted": len(fetched),
+                "articles": fetched, "clusters": [c.to_dict() for c in clusters], "summary": summary,
+            }
+        else:
+            yield sse_event("search_skipped", {"reason": "ENABLE_WEB_SEARCH_VERIFICATION is false or no queries generated"})
+
+        # --- Synthesis -------------------------------------------------------
+        yield sse_event("cross_evidence_started", {})
+        python_synthesis = None
+        try:
+            python_synthesis = synthesize(
+                poll=poll,
+                temporal=temporal_assessment.to_dict() if temporal_assessment else None,
+                clickbait=structured_claim.clickbait if structured_claim else None,
+                gemini_available=gemini["available"],
+            )
+            yield sse_event("cross_evidence_completed", {
+                "classification": python_synthesis.classification, "confidence": python_synthesis.confidence,
+            })
+        except Exception as exc:
+            logger.warning("[STREAM] synthesis failed: %s", exc)
+
+        winner = poll["winner"]
+        final_result = {
+            "success": True,
+            "label": winner,
+            "confidence": poll["confidence"],
+            "badgeClass": "success" if winner == "Real" else "danger" if winner == "Fake" else "warning",
+            "metrics": {
+                "modelVotes": poll["votes"], "totalModels": poll["totalVotes"],
+                "participatingModels": [p["model"] for p in predictions],
+            },
+            "explanation": (
+                f"{poll['winningVotes']} of {poll['totalVotes']} participating voters selected {winner}."
+                if winner != "Unknown" else "No model produced a usable result."
+            ),
+            "poll": poll,
+            "models": predictions,
+            "claim": structured_claim.to_dict() if structured_claim else None,
+            "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
+            "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
+            "relatedEvidence": related_evidence,
+            "webVerification": {
+                "available": gemini["available"], "vote": gemini["label"],
+                "explanation": gemini["explanation"], "sources": gemini["sources"],
+            },
+            "relatedNews": gemini["sources"],
+            "input": {"headline": headline, "articleUrl": article_url, "articleExtracted": bool(extracted.get("text"))},
+        }
+
+        yield sse_event("final_result", final_result)
+        yield sse_event("analysis_completed", {
+            "analysisId": analysis_id, "status": "COMPLETED",
+            "durationMs": round((time.perf_counter() - started) * 1000, 1),
+        })
+
+    except Exception as exc:
+        logger.exception("[STREAM] pipeline crashed")
+        yield sse_event("error", {"stage": "pipeline", "message": str(exc)})
+        yield sse_event("analysis_completed", {"analysisId": analysis_id, "status": "FAILED"})
+
+
+@app.post("/analyze/news/stream")
+def analyze_news_stream(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(default=None)):
+    return StreamingResponse(
+        stream_news_analysis(payload.headline or payload.text, payload.article_url, payload.article_text, x_gemini_api_key),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 @app.get("/")
 def root():
@@ -2020,11 +2241,9 @@ def analyze_news(
         logger.warning("[TEMPORAL] classification failed, continuing without it: %s", exc)    
 
 
-    # -----------------------------------------------------------------
     # Gather every voter's prediction FIRST, then poll once. Each voter
     # is called exactly once -- a heuristic counted twice would silently
     # double its weight in the ensemble.
-    # -----------------------------------------------------------------
     predictions = []
 
     local = local_news_prediction(content)
@@ -2094,6 +2313,11 @@ def analyze_news(
     related_sources = gemini["sources"] or [
         {"title": a["title"], "url": a["url"]} for a in related_articles
     ]
+    related_evidence = None
+    try:
+        related_evidence = collect_related_articles(suggested_queries, primary_label=poll["winner"])
+    except Exception as exc:
+        logger.warning("[EVIDENCE] related evidence collection failed: %s", exc)
     python_synthesis = None
     try:
         python_synthesis = synthesize(
@@ -2145,7 +2369,7 @@ def analyze_news(
         "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
         "suggestedSearchQueries": suggested_queries,
         "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
-
+        "relatedEvidence": related_evidence,
         
     }
 
@@ -2424,6 +2648,20 @@ CONTENT:
             ),
         )
 
+
+@app.post("/analyze/cluster")
+def analyze_cluster(payload: ClusterPayload):
+    articles = [
+        ArticleForClustering(id=a.id, url=a.url, domain=a.domain, title=a.title)
+        for a in payload.articles
+    ]
+    clusters = cluster_articles(articles)
+    return {
+        "success": True,
+        "clusters": [c.to_dict() for c in clusters],
+        "summary": independence_summary(clusters),
+    }
+
 @app.post("/analyze/temporal")
 def analyze_temporal(payload: TemporalPayload):
     assessment = classify_currentness(payload.published_at or None, payload.mentioned_dates)
@@ -2473,9 +2711,6 @@ ARTICLE:
             "summary": fallback,
             "source": "extractive_fallback",
         }
-# ---------------------------------------------------------------------
-# STATUS
-# ---------------------------------------------------------------------
 
 def model_status():
     active = {
@@ -2534,9 +2769,6 @@ def model_status():
 def analyze_health():
     return health()
 
-# ---------------------------------------------------------------------
-# START
-# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
