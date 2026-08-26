@@ -16,7 +16,7 @@ export default function Navbar() {
         </div>
         <div className="ms-auto d-flex align-items-center">
           <span className="pulse-indicator pulsing-green"></span>
-          <span className="text-secondary small" style={{ fontSize: '0.85rem' }}>System Ready</span>
+          <span className="text-muted small" style={{color: '#f9f9f9'}}>System Ready</span>
         </div>
       </div>
     </nav>

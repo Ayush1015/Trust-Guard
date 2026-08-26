@@ -1,0 +1,8 @@
+{
+    "text_column": "text",
+    "label_column": "label",
+    "classes": [
+        "0",
+        "1"
+    ]
+}
