@@ -52,7 +52,9 @@ const callMLService = async (
       }
     );
 
-    const contentType = response.headers.get('content-type') || '';
+    const contentType = (response.headers && typeof response.headers.get === 'function')
+      ? (response.headers.get('content-type') || '')
+      : 'application/json';
     let data;
 
     if (contentType.includes('application/json')) {
