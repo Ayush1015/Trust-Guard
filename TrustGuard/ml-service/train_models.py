@@ -1006,7 +1006,7 @@ def normalize_news_label(
     if value in {
         "fake",
         "false",
-        "1",
+        "0",
         "f",
         "fake news"
     }:
@@ -1016,7 +1016,7 @@ def normalize_news_label(
     if value in {
         "real",
         "true",
-        "0",
+        "1",
         "r",
         "real news"
     }:

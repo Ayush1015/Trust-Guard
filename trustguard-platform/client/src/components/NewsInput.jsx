@@ -26,15 +26,18 @@ export default function NewsInput({ onSubmit, loading }) {
         </span>
       </div>
       
-      <textarea
-        id="news-text"
-        className="form-control form-control-custom"
-        rows="8"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Copy and paste the full body text of the article you want to analyze here..."
-        disabled={loading}
-      />
+      <div className="textarea-wrapper">
+        <textarea
+          id="news-text"
+          className="form-control form-control-custom"
+          rows="8"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Copy and paste the full body text of the article you want to analyze here..."
+          disabled={loading}
+        />
+        <div className="scanline"></div>
+      </div>
 
       <div className="d-flex gap-2 justify-content-end">
         <button
@@ -53,7 +56,7 @@ export default function NewsInput({ onSubmit, loading }) {
         >
           {loading ? (
             <>
-              <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+              <span className="scanner-loader" role="status" aria-hidden="true"></span>
               Analyzing Article...
             </>
           ) : (

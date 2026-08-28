@@ -76,10 +76,9 @@ const callMLService = async (
       }
     );
 
-    const contentType =
-      response.headers.get(
-        'content-type'
-      ) || '';
+    const contentType = (response.headers && typeof response.headers.get === 'function')
+      ? (response.headers.get('content-type') || '')
+      : 'application/json';
 
     let data;
 
@@ -305,10 +304,11 @@ export const analyzeNews = async (
     // A saved per-user Gemini key takes precedence over the server default,
     // matching the existing X-Gemini-API-Key header the client already sends
     // for anonymous sessions.
-    if (userContext?.gemini_api_key && !req.headers['x-gemini-api-key']) {
+    const geminiKeyHeader = req.headers ? req.headers['x-gemini-api-key'] : undefined;
+    if (userContext?.gemini_api_key && !geminiKeyHeader) {
       headers['X-Gemini-API-Key'] = userContext.gemini_api_key;
-    } else if (req.headers['x-gemini-api-key']) {
-      headers['X-Gemini-API-Key'] = req.headers['x-gemini-api-key'];
+    } else if (geminiKeyHeader) {
+      headers['X-Gemini-API-Key'] = geminiKeyHeader;
     }
 
 

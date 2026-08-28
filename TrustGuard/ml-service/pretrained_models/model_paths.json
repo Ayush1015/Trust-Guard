@@ -1,7 +1,7 @@
 {
-    "fake_review_model": "C:\\Users\\om200\\.cache\\kagglehub\\models\\thedeveloper306\\fake-review-detector-model\\scikitLearn\\default\\1",
-    "truthlens": "C:\\Users\\om200\\.cache\\kagglehub\\models\\saitejabandaruin\\truthlens\\pyTorch\\pytorch\\1",
-    "fake_news_model": "C:\\Users\\om200\\.cache\\kagglehub\\models\\angelchaudhary\\fake-news-detection-model\\scikitLearn\\default\\1",
-    "bertphish": "C:\\Users\\om200\\.cache\\kagglehub\\models\\lucasrobson\\bertphish\\transformers\\default\\1",
-    "phishing_random_forest": "C:\\Users\\om200\\.cache\\kagglehub\\models\\christinecoomans\\phishing_detection_random_forest_v1\\scikitLearn\\default\\1"
+    "fake_review_model": "C:\\Users\\Ayush\\.cache\\kagglehub\\models\\thedeveloper306\\fake-review-detector-model\\scikitLearn\\default\\1",
+    "truthlens": "C:\\Users\\Ayush\\.cache\\kagglehub\\models\\saitejabandaruin\\truthlens\\pyTorch\\pytorch\\1",
+    "fake_news_model": "C:\\Users\\Ayush\\.cache\\kagglehub\\models\\angelchaudhary\\fake-news-detection-model\\scikitLearn\\default\\1",
+    "bertphish": "C:\\Users\\Ayush\\.cache\\kagglehub\\models\\lucasrobson\\bertphish\\transformers\\default\\1",
+    "phishing_random_forest": "C:\\Users\\Ayush\\.cache\\kagglehub\\models\\christinecoomans\\phishing_detection_random_forest_v1\\scikitLearn\\default\\1"
 }

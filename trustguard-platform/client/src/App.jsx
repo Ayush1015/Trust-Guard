@@ -615,7 +615,8 @@ function App() {
 
       <main className="container flex-grow-1 py-4 py-lg-5">
         {/* HERO */}
-        <section className="text-center mb-4 mb-lg-5">
+        <section className="text-center mb-4 mb-lg-5 hero-stage">
+          <div className="hero-orbit" aria-hidden="true" />
           <ToneBadge
             tone={
               backend.status === "online"
@@ -874,6 +875,21 @@ function App() {
             activeTab={activeTab}
             setActiveTab={changeTab}
           />
+          <div
+            className={`verification-seal ${loading ? "is-scanning" : result ? "is-flipped" : ""}`}
+            aria-hidden="true"
+          >
+            <div className="verification-seal-inner">
+              <div className="verification-seal-face verification-seal-front">
+                <i className="bi bi-shield-lock" />
+                <span>READY</span>
+              </div>
+              <div className="verification-seal-face verification-seal-back">
+                <i className={`bi ${result ? "bi-check-lg" : "bi-search"}`} />
+                <span>{result?.label || "VERIFYING"}</span>
+              </div>
+            </div>
+          </div>
           {activeTab === "news" && (
   <div className="form-check form-switch mb-2">
     <input className="form-check-input" type="checkbox" id="live-mode" checked={liveMode} onChange={(e) => setLiveMode(e.target.checked)} />
@@ -915,8 +931,7 @@ function App() {
               aria-live="polite"
               aria-busy="true"
             >
-              <div
-                className="spinner-border text-info"
+              <div className="scan-orbit"
                 role="status"
               >
                 <span className="visually-hidden">
@@ -1400,7 +1415,7 @@ function StatusCard({
 }) {
   return (
     <div
-      className="h-100 p-3 glass-card"
+    className="h-100 p-3 glass-card status-card"
       style={{
         background: UI.card,
         border: `1px solid ${UI.cardBorder}`,
