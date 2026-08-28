@@ -9,10 +9,10 @@ export default function Navbar({
 }) {
   const statusColor =
     backendStatus === 'online'
-      ? '#4ade80'
+      ? 'var(--success)'
       : backendStatus === 'checking'
-        ? '#fbbf24'
-        : '#fb7185';
+        ? 'var(--warning)'
+        : 'var(--danger)';
 
   return (
     <nav className="tg-navbar navbar navbar-expand-lg border-0 rounded-0 py-3 mb-4 sticky-top">

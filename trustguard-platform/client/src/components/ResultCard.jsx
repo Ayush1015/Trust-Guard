@@ -14,7 +14,7 @@ export default function ResultCard({ result, type }) {
   };
 
   return (
-    <div className="glass-card p-4 mt-4 border-0 shadow-lg" style={{ background: 'var(--bg-card)' }}>
+    <div className="glass-card result-reveal p-4 mt-4 border-0 shadow-lg" style={{ background: 'var(--bg-card)' }}>
       {/* Header section */}
       <div className="d-flex justify-content-between align-items-center mb-3">
         <h3
@@ -23,7 +23,7 @@ export default function ResultCard({ result, type }) {
         >
           Analysis Report
         </h3>
-        <span className={`badge px-3 py-2 fs-6 rounded-pill ${displayBadgeClass}`}>
+        <span className={`badge verdict-mark px-3 py-2 fs-6 rounded-pill ${displayBadgeClass}`}>
           {label}
         </span>
       </div>

@@ -64,6 +64,7 @@ from services.claim_service import build_structured_claim, claim_to_search_queri
 from services.temporal_service import classify_currentness
 from services.synthesis_service import synthesize
 from services.cache_service import gemini_news_cache, make_gemini_cache_key
+from services.clustering_service import ArticleForClustering, cluster_articles
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -954,9 +955,9 @@ def load_all_models():
 
 def news_label(value: Any) -> str:
     v = str(value).strip().lower()
-    if v in {"fake", "false", "1", "fake news", "f"}:
+    if v in {"fake", "false", "0", "fake news", "f"}:
         return "Fake"
-    if v in {"real", "true", "0", "real news", "r"}:
+    if v in {"real", "true", "1", "real news", "r"}:
         return "Real"
     return "Unknown"
 
