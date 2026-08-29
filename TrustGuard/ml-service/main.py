@@ -26,7 +26,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import joblib
 import numpy as np
@@ -37,6 +37,7 @@ import uuid
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from bs4 import BeautifulSoup 
 from adapters.search_adapter import DuckDuckGoSearchAdapter, SearchService, SearchResult
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -65,14 +66,40 @@ from services.claim_service import build_structured_claim, claim_to_search_queri
 from services.temporal_service import classify_currentness
 from services.synthesis_service import synthesize
 from services.cache_service import gemini_news_cache, make_gemini_cache_key
+from services.clustering_service import (
+    ArticleForClustering,
+    cluster_articles,
+    independence_summary,
+)
+from difflib import SequenceMatcher
+from time import time as _now
+
+
+SEARCH_ENGINE_URL = "https://html.duckduckgo.com/html/"
 
 BASE_DIR = Path(__file__).resolve().parent
+_PIB_CACHE: dict[str, tuple[float, dict]] = {}
+PIB_CACHE_TTL = 900 
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("trustguard")
+
+
+def env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """Read an integer environment variable without crashing startup."""
+    raw = os.getenv(name)
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        logger.warning("[CONFIG] Invalid integer for %s=%r; using %s", name, raw, default)
+        value = default
+    if minimum is not None and value < minimum:
+        logger.warning("[CONFIG] %s=%s is below minimum %s; using %s", name, value, minimum, minimum)
+        value = minimum
+    return value
 
 
 def load_env_file_safely(path: Path) -> None:
@@ -120,11 +147,31 @@ def load_env_file_safely(path: Path) -> None:
 load_env_file_safely(BASE_DIR / ".env")
 
 HOST = os.getenv("HOST", "127.0.0.1")
-PORT = int(os.getenv("PORT", "8000"))
-RELOAD = os.getenv("RELOAD", "true").lower() == "true"
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
-MAX_ARTICLE_CHARS = int(os.getenv("MAX_ARTICLE_CHARS", "30000"))
-MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "100000"))
+PORT = env_int("PORT", 8000, minimum=1)
+RELOAD = os.getenv("RELOAD", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+# ---------------------------------------------------------------------
+# TIMEOUT CONFIGURATION
+# ---------------------------------------------------------------------
+# A full /analyze/news run can chain many outbound network calls (article
+# extraction, PIB search + page fetches, DuckDuckGo search, related-article
+# fetches, Gemini). Each one used to carry its own small, independently
+# guessed timeout (some as low as 8s), which meant the SLOWEST call in the
+# chain -- not the total analysis time -- decided whether the whole request
+# failed. Timeouts are now centralized here, sized generously by default,
+# and fully configurable via environment variables so a slow network never
+# has to mean a broken feature. Every outbound HTTP call in this file uses
+# one of these constants (or REQUEST_TIMEOUT itself) instead of a
+# hard-coded number.
+REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 45, minimum=5)
+PIB_SEARCH_TIMEOUT = env_int("PIB_SEARCH_TIMEOUT", REQUEST_TIMEOUT, minimum=5)
+PIB_PAGE_FETCH_TIMEOUT = env_int("PIB_PAGE_FETCH_TIMEOUT", REQUEST_TIMEOUT, minimum=5)
+PAGE_TITLE_FETCH_TIMEOUT = env_int("PAGE_TITLE_FETCH_TIMEOUT", 15, minimum=5)
+SEARCH_ENGINE_TIMEOUT = env_int("SEARCH_ENGINE_TIMEOUT", REQUEST_TIMEOUT, minimum=5)
+GEMINI_REQUEST_TIMEOUT = env_int("GEMINI_REQUEST_TIMEOUT", 90, minimum=10)
+
+MAX_ARTICLE_CHARS = env_int("MAX_ARTICLE_CHARS", 30000, minimum=1000)
+MAX_INPUT_CHARS = env_int("MAX_INPUT_CHARS", 100000, minimum=1000)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
@@ -135,12 +182,32 @@ GEMINI_API_KEYS = (
 )
 gemini_rotator = GeminiKeyRotator(GEMINI_API_KEYS, cooldown_seconds=90)
 
+PIB_FACTCHECK_SEARCH_URL = "https://factcheck.pib.gov.in/search"
+PIB_FACTCHECK_BASE = "https://factcheck.pib.gov.in"
+
+STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "of",
+    "to", "for", "and", "or", "with", "by", "has", "have", "had", "this",
+    "that", "it", "as", "be", "been", "will", "says", "said", "over",
+}
+
+TRUSTED_NEWS_DOMAINS = {
+    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "npr.org",
+    "theguardian.com", "nytimes.com", "washingtonpost.com", "wsj.com",
+    "aljazeera.com", "hindustantimes.com", "thehindu.com", "indianexpress.com",
+    "ndtv.com", "timesofindia.indiatimes.com", "pib.gov.in", "factcheck.pib.gov.in",
+    "who.int", "cdc.gov", "un.org", "afp.com", "pti.in", "bloomberg.com",
+    "cnn.com", "abcnews.go.com",
+}
+
+SHADY_NEWS_PATTERNS = ("blogspot", "wordpress.com/20", "wixsite", ".click", "viral")
+
 # WHOIS domain-age lookups are a real network call with real latency, so
 # they stay opt-in rather than firing on every phishing check by default.
 ENABLE_DOMAIN_AGE_LOOKUP = os.getenv("ENABLE_DOMAIN_AGE_LOOKUP", "false").lower() == "true"
 ENABLE_WEB_SEARCH_VERIFICATION = os.getenv("ENABLE_WEB_SEARCH_VERIFICATION", "false").lower() == "true"
-MAX_SEARCH_ARTICLES_TO_FETCH = int(os.getenv("MAX_SEARCH_ARTICLES_TO_FETCH", "6"))
-SEARCH_FETCH_WORKERS = int(os.getenv("SEARCH_FETCH_WORKERS", "4"))
+MAX_SEARCH_ARTICLES_TO_FETCH = env_int("MAX_SEARCH_ARTICLES_TO_FETCH", 6, minimum=1)
+SEARCH_FETCH_WORKERS = env_int("SEARCH_FETCH_WORKERS", 4, minimum=1)
 
 _search_service = SearchService([DuckDuckGoSearchAdapter()])
 CORS_ORIGINS = [
@@ -192,8 +259,13 @@ PRETRAINED_DIR = (
     else (BASE_DIR / "pretrained_models").resolve()
 )
 
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    raise RuntimeError(
+        f"Unable to create model directories: {MODELS_DIR} / {PRETRAINED_DIR}"
+    ) from exc
 
 
 news_model: Any = None
@@ -245,7 +317,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TrustGuard ML Service",
-    version="5.2.0",
+    version="5.2.1",
     description="TrustGuard multi-model digital verification engine",
     lifespan=lifespan,
 )
@@ -333,6 +405,14 @@ def predict_pretrained_item(item: dict[str, Any], content: str):
         return None
 
 def build_news_registry():
+    """Populate news_registry from whatever models are currently loaded.
+
+    BUGFIX: this was previously defined but never called from anywhere,
+    so news_registry stayed empty forever — /models/registry always
+    reported zero adapters, and the per-article ML poll inside
+    /analyze/news/stream silently did nothing. It is now invoked at the
+    end of load_all_models(), after every model source has loaded.
+    """
     news_registry.clear()
 
     if news_model is not None and news_vectorizer is not None:
@@ -458,6 +538,219 @@ def load_joblib(path: Path) -> Any:
         )
         logger.exception("[MODEL] Failed loading %s", path)
         return None
+
+
+def _pib_cache_key(headline: str, article_text: str) -> str:
+    basis = f"{headline.strip().lower()}|{article_text[:500].strip().lower()}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+def pib_fact_check(headline: str, article_text: str) -> dict[str, Any]:
+    """
+    Search PIB for an existing fact-check and return a verdict only when
+    the result is sufficiently relevant.
+
+    Strategy:
+    1. Search using the original headline.
+    2. Search using distinctive keywords.
+    3. Search using a shorter keyword query.
+    4. Compare against PIB title AND page text.
+    5. Prefer explicit PIB verdict markers.
+
+    NOTE ON DUPLICATION FIX: this function used to be defined twice in
+    this file. The second (later) definition silently shadowed this one
+    — Python keeps only the last def with a given name — so the more
+    thorough page-content-fetching version below was dead code and the
+    service was actually running a title-only, single-query fallback.
+    That duplicate has been removed; this is now the one and only
+    implementation, and it is also cached (positive matches only —
+    "not found"/"inconclusive" results are never cached, so a real PIB
+    post published later is picked up on the next request rather than
+    being masked by a stale miss).
+    """
+    cache_key = _pib_cache_key(headline, article_text)
+    cached = _PIB_CACHE.get(cache_key)
+    if cached is not None:
+        cached_at, cached_result = cached
+        if (_now() - cached_at) < PIB_CACHE_TTL:
+            logger.info("[CACHE] PIB fact-check cache hit.")
+            return cached_result
+        _PIB_CACHE.pop(cache_key, None)
+
+    query_source = (headline or "").strip() or (article_text or "")[:500].strip()
+
+    if not query_source:
+        return _pib_empty_result("No headline or text supplied.")
+
+    keywords = extract_keywords(query_source, limit=10)
+
+    queries = []
+    if headline.strip():
+        queries.append(headline.strip())
+
+    if keywords:
+        queries.append(" ".join(keywords[:8]))
+        queries.append(" ".join(keywords[:5]))
+
+    # Remove duplicate queries while preserving order.
+    queries = list(dict.fromkeys(q for q in queries if q.strip()))
+
+    all_posts = []
+
+    for query in queries:
+        try:
+            posts = find_pib_posts(query, max_results=8)
+            all_posts.extend(posts)
+        except Exception as exc:
+            logger.warning("[PIB] Search failed for %r: %s", query, exc)
+
+    # Deduplicate PIB results by URL.
+    unique_posts = []
+    seen_urls = set()
+
+    for post in all_posts:
+        url = (post.get("url") or "").strip()
+
+        if not url or url in seen_urls:
+            continue
+
+        if "pib.gov.in" not in url.lower() and "factcheck.pib.gov.in" not in url.lower():
+            continue
+
+        seen_urls.add(url)
+        unique_posts.append(post)
+
+    if not unique_posts:
+        return _pib_empty_result(
+            "No PIB fact-check posts found."
+        )
+
+    # Cheap title-only prefilter before paying for a full page fetch.
+    # Fetching all 20 candidate pages serially (each up to REQUEST_TIMEOUT
+    # seconds) could stall the whole /analyze/news request well past its
+    # own budget. We now only fetch the most promising candidates, and do
+    # so in parallel with a short, request-independent timeout.
+    prefiltered = sorted(
+        unique_posts[:20],
+        key=lambda post: keyword_overlap_score(keywords, post.get("title", ""), query_source),
+        reverse=True,
+    )[:8]
+
+    def _score_post(post: dict[str, str]) -> Optional[dict[str, Any]]:
+        title = (post.get("title") or "").strip()
+        url = (post.get("url") or "").strip()
+
+        # Fetch the PIB page so matching is not based only on its title.
+        page_text = ""
+        try:
+            response = requests.get(
+                url,
+                # Was hard-clamped to min(REQUEST_TIMEOUT, 8), which meant
+                # PIB page fetches routinely timed out on slower connections
+                # regardless of how generous REQUEST_TIMEOUT was configured.
+                # Now uses its own configurable budget.
+                timeout=PIB_PAGE_FETCH_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"},
+            )
+
+            if response.ok:
+                soup = BeautifulSoup(response.text, "html.parser")
+
+                # Remove scripts/styles before extracting text.
+                for tag in soup(["script", "style", "noscript"]):
+                    tag.decompose()
+
+                page_text = soup.get_text(" ", strip=True)[:20000]
+
+        except Exception as exc:
+            logger.debug("[PIB] Could not fetch %s: %s", url, exc)
+
+        combined = f"{title} {page_text}".strip()
+
+        # Match against the whole PIB page, not just the title.
+        score = keyword_overlap_score(keywords, combined, query_source)
+
+        # Explicit PIB verdict should be detected from title + content.
+        verdict = parse_pib_verdict(title, page_text)
+
+        if not verdict:
+            return None
+
+        # Give explicit verdict-bearing PIB pages a small confidence bonus.
+        score = min(1.0, score + 0.10)
+        return {**post, "score": score, "verdict": verdict}
+
+    scored = []
+    with ThreadPoolExecutor(max_workers=min(4, len(prefiltered) or 1)) as executor:
+        futures = [executor.submit(_score_post, post) for post in prefiltered]
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.debug("[PIB] Scoring worker failed: %s", exc)
+                continue
+            if result:
+                scored.append(result)
+
+    if not scored:
+        return _pib_empty_result(
+            "PIB posts were found, but no explicit PIB verdict could be identified."
+        )
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    # Slightly lower than the old threshold because we now compare
+    # against the complete PIB page rather than only its title.
+    MATCH_THRESHOLD = 0.25
+
+    strong_matches = [
+        item for item in scored
+        if item["score"] >= MATCH_THRESHOLD
+    ]
+
+    if not strong_matches:
+        return _pib_empty_result(
+            "PIB posts were found but none matched the supplied claim closely enough.",
+            near_miss=scored[0],
+        )
+
+    # Use the strongest result as the primary fact-check.
+    best = strong_matches[0]
+
+    # Only accept additional matches when they agree.
+    agreeing = [
+        item for item in strong_matches[:5]
+        if item["verdict"] == best["verdict"]
+    ]
+
+    result = {
+        "available": True,
+        "covered": True,
+        "label": best["verdict"],
+        "explanation": (
+            f"PIB fact-check found. "
+            f"Verdict: {best['verdict']}. "
+            f"Matched {len(agreeing)} relevant PIB result(s)."
+        ),
+        "sources": [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "verdict": item.get("verdict"),
+                "score": round(item.get("score", 0.0), 3),
+            }
+            for item in strong_matches[:5]
+        ],
+    }
+
+    # Only cache real, positive coverage. Never cache "not found" or
+    # "inconclusive" results, matching the project's "never cache
+    # failures" caching policy — a fresh PIB post can appear at any time.
+    _PIB_CACHE[cache_key] = (_now(), result)
+
+    return result
+
+
 
 def load_local_models():
     global news_model, news_vectorizer
@@ -942,6 +1235,11 @@ def load_all_models():
     load_pretrained_models()
     load_bertphish()
     load_hf_news_classifiers()
+
+    # BUGFIX: previously never called, so news_registry stayed empty
+    # forever. Must run last, after every model source above has loaded.
+    build_news_registry()
+
     logger.info(
         "Models ready | news=%s review=%s phishing=%s pretrained=%d bertphish=%s hf_news=%d",
         bool(news_model is not None and news_vectorizer is not None),
@@ -1489,56 +1787,115 @@ def registry_result_to_poll_dict(result: Any) -> Optional[dict[str, Any]]:
         source="registry",
     )
 
-def model_poll(predictions: list[dict[str, Any]], task: str):
-    valid = [
-        p for p in predictions
-        if p
-        and p.get("status") == "participated"
-        and p.get("label") not in {None, "", "Unknown"}
-    ]
+def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
+    """Aggregate compatible predictions into an inspectable ensemble result.
+
+    A prediction contributes ``confidence * weight`` to its label.  This means
+    model confidence and explicit voter weights affect both the winner and the
+    reported confidence instead of being used only as a tie-breaker.
+    """
+    valid: list[dict[str, Any]] = []
+
+    for prediction in predictions or []:
+        if not prediction:
+            continue
+        if prediction.get("status") != "participated":
+            continue
+        label = prediction.get("label")
+        if label in {None, "", "Unknown"}:
+            continue
+
+        try:
+            confidence = clamp01(prediction.get("confidence"), 0.5)
+            weight = max(0.1, float(prediction.get("weight", 1.0)))
+        except (TypeError, ValueError):
+            logger.warning("[POLL] Ignoring malformed prediction: %r", prediction)
+            continue
+
+        normalized = dict(prediction)
+        normalized["confidence"] = round(confidence * 100, 2)
+        normalized["weight"] = weight
+        valid.append(normalized)
 
     if not valid:
         return {
             "winner": "Unknown",
             "votes": {},
             "weightedVotes": {},
+            "weightedSharePercent": {},
             "totalVotes": 0,
             "winningVotes": 0,
             "confidence": 0,
+            "voteRatioConfidence": 0,
+            "weightedConfidence": 0,
+            "margin": 0,
+            "runnerUp": None,
+            "isUnanimous": False,
+            "isTie": False,
             "models": [],
             "task": task,
         }
 
-    # Every model gets one vote. Confidence is a secondary weighted score,
-    # not a replacement for the vote.
     votes = Counter(p["label"] for p in valid)
-    weighted = {}
-    for p in valid:
-        label = p["label"]
-        conf = clamp01(p.get("confidence"), 0.5)
-        weight = max(0.1, float(p.get("weight", 1.0)))
-        weighted[label] = weighted.get(label, 0.0) + conf * weight
+    weighted: dict[str, float] = {}
 
-    top = max(votes.values())
-    leaders = [label for label, count in votes.items() if count == top]
+    for prediction in valid:
+        label = prediction["label"]
+        confidence = clamp01(prediction.get("confidence"), 0.5)
+        weight = max(0.1, float(prediction.get("weight", 1.0)))
+        weighted[label] = weighted.get(label, 0.0) + confidence * weight
 
-    if len(leaders) == 1:
-        winner = leaders[0]
-    else:
-        winner = max(leaders, key=lambda x: weighted.get(x, 0.0))
+    # Weighted score is the primary decision signal.
+    ranked = sorted(
+        weighted.items(),
+        key=lambda item: (item[1], votes.get(item[0], 0)),
+        reverse=True,
+    )
+    winner = ranked[0][0]
 
     winning_votes = votes[winner]
-    vote_confidence = winning_votes / len(valid)
+    vote_ratio_confidence = winning_votes / len(valid)
+    total_weighted = sum(weighted.values())
+
+    weighted_confidence = (
+        weighted[winner] / total_weighted if total_weighted > 0 else 0.0
+    )
+
+    runner_up = None
+    margin = winning_votes
+    if len(ranked) > 1:
+        runner_label, runner_score = ranked[1]
+        runner_votes = votes[runner_label]
+        runner_up = {
+            "label": runner_label,
+            "votes": runner_votes,
+            "weightedScore": round(runner_score, 4),
+            "weightedSharePercent": round(
+                (runner_score / total_weighted) * 100 if total_weighted else 0.0,
+                2,
+            ),
+        }
+        margin = winning_votes - runner_votes
+
+    weighted_share_percent = {
+        label: round((score / total_weighted) * 100 if total_weighted else 0.0, 2)
+        for label, score in weighted.items()
+    }
 
     return {
         "winner": winner,
         "votes": dict(votes),
-        "weightedVotes": {
-            k: round(v, 4) for k, v in weighted.items()
-        },
+        "weightedVotes": {label: round(score, 4) for label, score in weighted.items()},
+        "weightedSharePercent": weighted_share_percent,
         "totalVotes": len(valid),
         "winningVotes": winning_votes,
-        "confidence": round(vote_confidence * 100, 2),
+        "confidence": round(weighted_confidence * 100, 2),
+        "voteRatioConfidence": round(vote_ratio_confidence * 100, 2),
+        "weightedConfidence": round(weighted_confidence * 100, 2),
+        "margin": margin,
+        "runnerUp": runner_up,
+        "isUnanimous": len(votes) == 1,
+        "isTie": len(ranked) > 1 and weighted[ranked[0][0]] == weighted[ranked[1][0]],
         "models": valid,
         "task": task,
     }
@@ -1576,7 +1933,7 @@ def extract_article(url: str) -> dict[str, Any]:
     # bs4 fallback reuses the SAME already-fetched HTML — no second
     # network round-trip, no chance of hitting the zstd bug twice.
     try:
-        from bs4 import BeautifulSoup
+        
 
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript", "svg"]):
@@ -1791,14 +2148,13 @@ UNCERTAINTY: important limitations
                 label = "Fake"
             else:
                 label = "Unknown"
-
             result = {
                 "available": True,
                 "label": label,
                 "explanation": output,
                 "sources": extract_grounding_sources(response),
+                "mode": "gemini",
             }
-
             # 6. Cache ONLY successful server/shared-key results.
             #
             # Never cache results generated using a user's own key.
@@ -1856,7 +2212,7 @@ UNCERTAINTY: important limitations
             extract_article,
             local_news_prediction,
         )
-
+        result = _improve_offline_verification_result(result)
         return result
 
     except Exception as exc:
@@ -1916,10 +2272,256 @@ def gemini_generate(prompt: str, request_key: Optional[str] = None):
         status_code=503,
         detail=f"All configured Gemini keys are currently rate-limited: {last_error}",
     )
+URL_IN_TEXT_RE = re.compile(r'https?://[^\s<>"\')\]]+')
 
+def extract_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    found = [u.rstrip('.,;:!?') for u in URL_IN_TEXT_RE.findall(text)]
+    seen = []
+    for u in found:
+        if u not in seen:
+            seen.append(u)
+    return seen[:10]
 def sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
+
+COMMONLY_SPOOFED_BRANDS = (
+    "google", "paypal", "microsoft", "amazon", "netflix", "apple",
+    "facebook", "instagram", "whatsapp", "bankofamerica", "chase",
+    "wellsfargo", "americanexpress", "outlook", "gmail", "linkedin",
+)
+
+_HOMOGLYPH_MAP = str.maketrans({
+    "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "$": "s",
+})
+
+
+def _improve_offline_verification_result(result: dict[str, Any]) -> dict[str, Any]:
+    """
+    offline_news_verification() runs when Gemini is unavailable. When it
+    can't find any independent coverage it previously returned a blunt,
+    technical explanation. This reframes that specific case with clearer,
+    more actionable guidance, without touching cases where it DID find
+    something to report.
+    """
+    result = dict(result)
+    result.setdefault("mode", "offline")
+
+    explanation = str(result.get("explanation") or "")
+    no_coverage_markers = (
+        "no independent web coverage",
+        "no related articles",
+        "could not be found",
+    )
+
+    if (
+        result.get("label") == "Unknown"
+        and not result.get("sources")
+        and any(marker in explanation.lower() for marker in no_coverage_markers)
+    ):
+        result["explanation"] = (
+            "We couldn't independently confirm this claim right now "
+            "(Gemini web verification is unavailable, so we fell back to a "
+            "free web search). That's inconclusive, not a red flag by "
+            "itself — it commonly happens with breaking news, very local "
+            "or niche stories, or a temporarily unreachable search "
+            "backend. Treat the other model votes below as the primary "
+            "signal, and consider checking the original source or a "
+            "dedicated fact-checking site directly."
+
+        )
+
+    return result
+
+def detect_lookalike_brand(hostname: str) -> Optional[str]:
+    """
+    Flags a domain as a likely lookalike ONLY when, after normalizing
+    common digit/symbol-for-letter substitutions (0->o, 1->l, 3->e, ...),
+    its core label becomes an exact or near-exact match for a well-known,
+    frequently-spoofed brand name.
+
+    BUGFIX: this replaces a blanket regex (`[a-z][0-9][a-z]` /
+    `[0-9][a-z][0-9]`) that fired on ANY domain containing a
+    letter-digit-letter run anywhere -- which matches extremely common,
+    entirely legitimate domain patterns such as "b2b.com", "4u.com",
+    "2go.com", or "office365.com", making the URL-trust signal noisy and
+    frequently wrong. It now only fires when undoing the substitution
+    reveals a real, commonly-impersonated brand name.
+    """
+    if not hostname:
+        return None
+
+    core = hostname.split(".")[0]
+    normalized = core.translate(_HOMOGLYPH_MAP)
+
+    if normalized == core:
+        # No digit/symbol substitution present at all -- nothing to flag.
+        return None
+
+    for brand in COMMONLY_SPOOFED_BRANDS:
+        if normalized == brand or similarity(normalized, brand) >= 0.88:
+            return brand
+
+    return None
+
+
+def assess_url_trust(url: str, strict: bool = True) -> dict[str, Any]:
+    """
+    strict=True is used for the article's own URL and any URL explicitly
+    cited in the headline. strict=False is used for URLs merely found
+    embedded inside pasted body text, where weak/noisy signals (missing
+    HTTPS, high special-char count from tracking params, deep subdomain
+    nesting from CDNs) are extremely common on completely legitimate
+    sites and should not by themselves brand a source untrustworthy.
+    """
+    data = url_feature_data(url)
+    reputation = domain_reputation(data["hostname"])
+
+    if reputation == "trusted":
+        return {
+            "url": url, "hostname": data["hostname"], "trusted": True,
+            "reasons": ["recognized trusted news/government domain"],
+            "reputation": "trusted",
+        }
+
+    reasons = []
+
+    # Strong signals: meaningful regardless of whether this is the
+    # article's own address or an incidental body-embedded link.
+    if data["shady_tld"]:
+        reasons.append("suspicious top-level domain")
+    if reputation == "shady":
+        reasons.append("domain pattern associated with low-quality content farms")
+    try:
+        ip = ipaddress.ip_address(data["hostname"])
+        reasons.append("raw IP address instead of domain" if ip.is_global
+                        else "private/non-public IP address")
+    except ValueError:
+        pass
+    lookalike_of = detect_lookalike_brand(data["hostname"])
+    if lookalike_of:
+        reasons.append(f"possible lookalike domain of '{lookalike_of}'")
+
+    # Weak signals: only checked in strict mode (see docstring above).
+    if strict:
+        if not data["ssl"]:
+            reasons.append("no HTTPS")
+        if data["special_chars"] > 10:
+            reasons.append("excessive special characters")
+        if data["hostname"] and data["hostname"].count(".") > 3:
+            reasons.append("unusually deep subdomain nesting")
+
+    return {
+        "url": url, "hostname": data["hostname"],
+        "trusted": len(reasons) == 0, "reasons": reasons,
+        "reputation": reputation,
+    }
+
+def search_based_url_trust(headline: str, article_text: str = "") -> dict[str, Any]:
+    """
+    When no article URL/embedded links were supplied, search for who is
+    covering the claim and assess the trustworthiness of those domains.
+    Pure Python — search engine only, no AI model.
+    """
+    query = headline.strip() or article_text[:200].strip()
+    if not query:
+        return {"performed": False, "reason": "No headline or text to search."}
+
+    urls = search_related_urls(query, max_results=8)
+    if not urls:
+        return {
+            "performed": True, "checked": [], "trustedCount": 0,
+            "untrustworthyCount": 0, "totalChecked": 0,
+            "coverageFound": False,
+            "reason": "No related coverage found via search.",
+        }
+
+    checked = [assess_url_trust(u) for u in urls]
+    trusted = sum(1 for c in checked if c["trusted"])
+
+    return {
+        "performed": True, "checked": checked,
+        "trustedCount": trusted,
+        "untrustworthyCount": len(checked) - trusted,
+        "totalChecked": len(checked),
+        "coverageFound": True,
+    }
+
+def check_article_url_trust(headline: str, article_text: str, article_url: str) -> dict[str, Any]:
+    """
+    BUGFIX ("news URL trust check not working properly"): this used to
+    pull every URL out of the ENTIRE pasted article body and judge each
+    one with the same strict checklist as the article's own address.
+    Real article text -- even from completely reputable outlets --
+    routinely contains links to trackers, share widgets, related-reading
+    boxes, and ad partners, so this produced frequent false
+    "untrustworthy" hits with nothing to do with the claim itself. Now:
+      - the article's own URL and any URL explicitly cited in the
+        HEADLINE are checked strictly and drive the vote on their own;
+      - URLs merely found embedded inside the body text are checked
+        leniently and only contribute if there's an actual pattern of
+        them (2+), not a single incidental tracker link.
+    """
+    primary_candidates = ([article_url] if article_url else []) + extract_urls(headline)
+    body_candidates = extract_urls(article_text)
+
+    seen: set[str] = set()
+    primary_results = []
+    for u in primary_candidates:
+        norm = normalize_url(u)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        primary_results.append(assess_url_trust(norm, strict=True))
+
+    body_results = []
+    for u in body_candidates:
+        norm = normalize_url(u)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        body_results.append(assess_url_trust(norm, strict=False))
+
+    untrustworthy_primary = [r for r in primary_results if not r["trusted"]]
+    untrustworthy_body = [r for r in body_results if not r["trusted"]]
+
+    any_untrustworthy = bool(untrustworthy_primary) or len(untrustworthy_body) >= 2
+
+    return {
+        "checked": primary_results + body_results,
+        "primary": primary_results,
+        "bodyEmbedded": body_results,
+        "untrustworthyCount": len(untrustworthy_primary) + len(untrustworthy_body),
+        "anyUntrustworthy": any_untrustworthy,
+    }
+
+def extract_keywords(text: str, limit: int = 8) -> list[str]:
+    words = re.findall(r"[a-zA-Z0-9]{3,}", text.lower())
+    words = [w for w in words if w not in STOPWORDS]
+    # Preserve order, dedupe, keep the most distinctive (longer) tokens first
+    seen = []
+    for w in sorted(set(words), key=lambda x: -len(x)):
+        if w in words and w not in seen:
+            seen.append(w)
+    return seen[:limit]
+
+def similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _pib_empty_result(reason: str, near_miss: Optional[dict] = None) -> dict[str, Any]:
+    return {
+        "available": True,
+        "covered": False,
+        "label": "Unknown",
+        "explanation": reason + (
+            f" (closest: \"{near_miss['title']}\", score {near_miss.get('score', 0):.2f})"
+            if near_miss else ""
+        ),
+        "sources": [],
+    }
 
 def stream_news_analysis(headline: str, article_url: str, article_text: str, request_key: Optional[str]):
     """
@@ -2008,6 +2610,91 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
             else:
                 yield sse_event("model_unavailable", {"model": entry["name"]})
 
+        # Always-available zero-dependency stylometric voter, mirrored
+        # from analyze_news() so the live stream never has fewer voters
+        # than the non-streaming endpoint.
+        yield sse_event("model_started", {"model": "Heuristic Style Check"})
+        heuristic_vote = heuristic_news_vote(headline, article_text, make_prediction)
+        if heuristic_vote:
+            predictions.append(heuristic_vote)
+            yield sse_event("model_completed", {"model": "Heuristic Style Check", "label": heuristic_vote["label"], "confidence": heuristic_vote["confidence"]})
+        else:
+            yield sse_event("model_unavailable", {"model": "Heuristic Style Check"})
+
+        # URL Trust Analysis — same single-call logic as analyze_news().
+        embedded_url_trust = check_article_url_trust(headline, article_text, article_url)
+        if embedded_url_trust["anyUntrustworthy"]:
+            url_trust_vote = make_prediction("URL Trust Analysis", "Fake", 0.7, source="heuristic", weight=1.3)
+            predictions.append(url_trust_vote)
+            yield sse_event("model_completed", {"model": "URL Trust Analysis", "label": "Fake", "confidence": url_trust_vote["confidence"]})
+        else:
+            yield sse_event("model_unavailable", {"model": "URL Trust Analysis"})
+
+        poll = model_poll(predictions, "Fake News")
+        yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
+
+        # --- PIB Fact Check (independent voter, live-poll enabled) ---------
+        # Runs regardless of whether URLs were supplied, exactly like
+        # analyze_news(). Wrapped defensively: a PIB outage must never
+        # abort the whole live stream.
+        yield sse_event("model_started", {"model": "PIB Fact Check"})
+        try:
+            pib = pib_fact_check(headline, article_text)
+        except Exception as exc:
+            logger.warning("[STREAM] PIB fact-check failed: %s", exc)
+            pib = {"available": False, "covered": False, "label": "Unknown", "explanation": str(exc), "sources": []}
+
+        if pib.get("covered") and pib["label"] in {"Real", "Fake"}:
+            pib_vote = make_prediction("PIB Fact Check", pib["label"], None, source="pib", weight=1.5)
+            predictions.append(pib_vote)
+            yield sse_event("model_completed", {"model": "PIB Fact Check", "label": pib["label"], "confidence": pib_vote["confidence"]})
+        else:
+            yield sse_event("model_unavailable", {"model": "PIB Fact Check", "reason": pib.get("explanation")})
+
+        poll = model_poll(predictions, "Fake News")
+        yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
+
+        # --- Search Coverage Trust (independent voter, live-poll enabled) --
+        # Only meaningful when the article/headline supplied no links of
+        # its own to check directly — mirrors analyze_news() exactly.
+        search_url_trust = None
+        if not embedded_url_trust["checked"]:
+            yield sse_event("model_started", {"model": "Search Coverage Trust"})
+            try:
+                search_url_trust = search_based_url_trust(headline, article_text)
+            except Exception as exc:
+                logger.warning("[STREAM] Search Coverage Trust failed: %s", exc)
+                search_url_trust = {"performed": False, "reason": str(exc)}
+
+        search_url_trust = None
+        if not embedded_url_trust["checked"]:
+            yield sse_event("model_started", {"model": "Search Coverage Trust"})
+            try:
+                search_url_trust = search_based_url_trust(headline, article_text)
+            except Exception as exc:
+                logger.warning("[STREAM] Search Coverage Trust failed: %s", exc)
+                search_url_trust = {"performed": False, "reason": str(exc)}
+
+            search_trust_vote = None
+            if search_url_trust.get("coverageFound"):
+                total = search_url_trust["totalChecked"]
+                trust_ratio = search_url_trust["trustedCount"] / total if total else 0
+                if total >= 3:
+                    if trust_ratio >= 0.6:
+                        search_trust_vote = make_prediction("Search Coverage Trust", "Real", trust_ratio, source="heuristic", weight=1.2)
+                    elif trust_ratio <= 0.35:
+                        search_trust_vote = make_prediction("Search Coverage Trust", "Fake", 1 - trust_ratio, source="heuristic", weight=1.2)
+            
+
+            if search_trust_vote:
+                predictions.append(search_trust_vote)
+                yield sse_event("model_completed", {"model": "Search Coverage Trust", "label": search_trust_vote["label"], "confidence": search_trust_vote["confidence"]})
+            else:
+                yield sse_event("model_unavailable", {"model": "Search Coverage Trust", "reason": search_url_trust.get("reason") if search_url_trust else "not applicable"})
+            poll = model_poll(predictions, "Fake News")
+            yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
+
+        # --- Gemini (independent voter) -------------------------------------
         yield sse_event("model_started", {"model": "Gemini + Google Search"})
         gemini = gemini_news_check(headline, article_url, article_text, request_key)
         if gemini["label"] in {"Real", "Fake"}:
@@ -2029,6 +2716,17 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
             logger.warning("[STREAM] temporal classification failed: %s", exc)
 
         # --- Search + per-article ML + clustering (§10/§11/§13) -------------
+        #
+        # BUGFIX: article fetching used to be a plain sequential
+        # `for result in search_results: extract_article(result.url)`
+        # loop, even though ThreadPoolExecutor/as_completed were already
+        # imported and SEARCH_FETCH_WORKERS was already configurable —
+        # neither was ever actually used, so up to MAX_SEARCH_ARTICLES_TO_FETCH
+        # network fetches ran one at a time. Fetching (the network-bound
+        # part) is now parallelized across SEARCH_FETCH_WORKERS threads;
+        # the ML inference on each fetched article still runs sequentially
+        # afterwards (as each future completes) so model objects are never
+        # called concurrently from multiple threads.
         related_evidence = {"enabled": False, "articles": [], "clusters": [], "summary": None}
         if ENABLE_WEB_SEARCH_VERIFICATION and suggested_queries:
             yield sse_event("search_started", {"queries": suggested_queries})
@@ -2041,45 +2739,58 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
                 yield sse_event("search_failed", {"message": str(exc)})
 
             fetched = []
-            for result in search_results:
-                yield sse_event("article_found", {"url": result.url, "domain": result.domain})
-                article_extracted = extract_article(result.url)
-                if article_extracted.get("error") or not article_extracted.get("text"):
-                    yield sse_event("article_extraction_failed", {"url": result.url, "reason": article_extracted.get("errorMessage")})
-                    continue
+            worker_count = max(1, min(SEARCH_FETCH_WORKERS, len(search_results))) if search_results else 1
 
-                article_id = hashlib.sha256(result.url.encode()).hexdigest()[:12]
-                entry = {
-                    "id": article_id, "url": result.url, "domain": result.domain,
-                    "title": article_extracted.get("title") or result.title,
-                    "text": article_extracted.get("text"),
-                    "publishedAt": article_extracted.get("published_at"),
-                }
-                yield sse_event("article_extracted", {"url": result.url, "id": article_id})
-                yield sse_event("article_analysis_started", {"id": article_id, "url": result.url})
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_result = {}
+                for result in search_results:
+                    yield sse_event("article_found", {"url": result.url, "domain": result.domain})
+                    future_to_result[executor.submit(extract_article, result.url)] = result
 
-                registry_results = news_registry.run("news", entry["text"])
-                for r in registry_results:
-                    yield sse_event(
-                        "model_completed" if r.status == "success" else "model_unavailable",
-                        {"model": r.model, "articleId": article_id, "label": r.label, "confidence": r.confidence},
+                for future in as_completed(future_to_result):
+                    result = future_to_result[future]
+                    try:
+                        article_extracted = future.result()
+                    except Exception as exc:
+                        yield sse_event("article_extraction_failed", {"url": result.url, "reason": str(exc)})
+                        continue
+
+                    if article_extracted.get("error") or not article_extracted.get("text"):
+                        yield sse_event("article_extraction_failed", {"url": result.url, "reason": article_extracted.get("errorMessage")})
+                        continue
+
+                    article_id = hashlib.sha256(result.url.encode()).hexdigest()[:12]
+                    entry = {
+                        "id": article_id, "url": result.url, "domain": result.domain,
+                        "title": article_extracted.get("title") or result.title,
+                        "text": article_extracted.get("text"),
+                        "publishedAt": article_extracted.get("published_at"),
+                    }
+                    yield sse_event("article_extracted", {"url": result.url, "id": article_id})
+                    yield sse_event("article_analysis_started", {"id": article_id, "url": result.url})
+
+                    registry_results = news_registry.run("news", entry["text"])
+                    for r in registry_results:
+                        yield sse_event(
+                            "model_completed" if r.status == "success" else "model_unavailable",
+                            {"model": r.model, "articleId": article_id, "label": r.label, "confidence": r.confidence},
+                        )
+                    article_predictions = [p for p in (registry_result_to_poll_dict(r) for r in registry_results) if p]
+                    article_poll = model_poll(article_predictions, "Article ML Poll")
+                    entry["mlPoll"] = {
+                        "winner": article_poll["winner"], "votes": article_poll["votes"],
+                        "totalVotes": article_poll["totalVotes"], "confidence": article_poll["confidence"],
+                    }
+                    entry["articleLabelAgreement"] = (
+                        "INSUFFICIENT" if article_poll["winner"] == "Unknown"
+                        else "MATCHES_PRIMARY" if article_poll["winner"] == poll["winner"]
+                        else "DIFFERS_FROM_PRIMARY"
                     )
-                article_predictions = [p for p in (registry_result_to_poll_dict(r) for r in registry_results) if p]
-                article_poll = model_poll(article_predictions, "Article ML Poll")
-                entry["mlPoll"] = {
-                    "winner": article_poll["winner"], "votes": article_poll["votes"],
-                    "totalVotes": article_poll["totalVotes"], "confidence": article_poll["confidence"],
-                }
-                entry["articleLabelAgreement"] = (
-                    "INSUFFICIENT" if article_poll["winner"] == "Unknown"
-                    else "MATCHES_PRIMARY" if article_poll["winner"] == poll["winner"]
-                    else "DIFFERS_FROM_PRIMARY"
-                )
-                yield sse_event("article_analyzed", {
-                    "id": article_id, "url": result.url,
-                    "winner": article_poll["winner"], "agreement": entry["articleLabelAgreement"],
-                })
-                fetched.append(entry)
+                    yield sse_event("article_analyzed", {
+                        "id": article_id, "url": result.url,
+                        "winner": article_poll["winner"], "agreement": entry["articleLabelAgreement"],
+                    })
+                    fetched.append(entry)
 
             yield sse_event("source_clustering_started", {})
             cluster_inputs = [ArticleForClustering(id=a["id"], url=a["url"], domain=a["domain"], title=a["title"]) for a in fetched]
@@ -2130,8 +2841,21 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
             "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
             "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
             "relatedEvidence": related_evidence,
+            
+            "pibFactCheck": {
+                "available": pib.get("available", False),
+                "covered": pib.get("covered", False),
+                "vote": pib.get("label", "Unknown"),
+                "explanation": pib.get("explanation", ""),
+                "sources": pib.get("sources", []),
+            },
+            "urlTrust": {
+                "embedded": embedded_url_trust,
+                "searchBased": search_url_trust,
+            },
             "webVerification": {
                 "available": gemini["available"], "vote": gemini["label"],
+                "mode": gemini.get("mode", "gemini"),
                 "explanation": gemini["explanation"], "sources": gemini["sources"],
             },
             "relatedNews": gemini["sources"],
@@ -2154,15 +2878,209 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
 def analyze_news_stream(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(default=None)):
     return StreamingResponse(
         stream_news_analysis(payload.headline or payload.text, payload.article_url, payload.article_text, x_gemini_api_key),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+def find_pib_posts(query: str, max_results: int = 6) -> list[dict[str, str]]:
+    """
+    Finds PIB Fact Check posts via two independent, AI-free routes:
+    1. PIB's own site search
+    2. A site-restricted general web search (site:pib.gov.in)
+    Both are combined and deduplicated for redundancy.
+    """
+    found = []
+
+    # Route 1: PIB's own search
+    #
+    # BUGFIX ("pib check not working properly"): this used to accept
+    # ANY anchor tag on the search-results page with 15+ characters of
+    # link text -- including nav bars, footers, and social-share links
+    # unrelated to any actual fact-check post -- flooding the candidate
+    # list with junk that then had to be scored/fetched for nothing.
+    # Obvious non-article links (assets, feeds, tag/category pages,
+    # anchors, scripts) are now filtered out up front.
+    ignored_href_patterns = (
+        "javascript:", "mailto:", "#", "/wp-json/", "/tag/", "/category/",
+        "/feed", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".pdf", ".css", ".js",
+    )
+    try:
+        response = requests.get(
+            PIB_FACTCHECK_SEARCH_URL,
+            params={"q": query},
+            timeout=PIB_SEARCH_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"},
+        )
+        if response.ok:
+            soup = BeautifulSoup(response.text, "html.parser")
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if any(pat in href.lower() for pat in ignored_href_patterns):
+                    continue
+                title = link.get_text(" ", strip=True)
+                if len(title) >= 15:
+                    if not href.startswith("http"):
+                        href = PIB_FACTCHECK_BASE.rstrip("/") + "/" + href.lstrip("/")
+                    found.append({"title": title, "url": href})
+    except Exception as exc:
+        logger.debug("PIB direct search failed: %s", exc)
+
+    # Route 2: general search restricted to pib.gov.in (reuses existing scraper)
+    try:
+        site_query = f"site:pib.gov.in {query}"
+        for url in search_related_urls(site_query, max_results=max_results):
+            if "pib.gov.in" in url.lower():
+                found.append({"title": "", "url": url})
+    except Exception as exc:
+        logger.debug("Site-restricted PIB search failed: %s", exc)
+
+    # Fetch missing titles for route-2 results (needed for verdict parsing)
+    for item in found:
+        if not item["title"]:
+            item["title"] = fetch_page_title(item["url"]) or item["url"]
+
+    # Dedupe by URL
+    seen, unique = set(), []
+    for item in found:
+        if item["url"] not in seen:
+            seen.add(item["url"])
+            unique.append(item)
+
+    return unique[:max_results]
+
+
+def fetch_page_title(url: str) -> str:
+    try:
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"})
+        if r.ok:
+            soup = BeautifulSoup(r.text, "html.parser")
+            if soup.title:
+                return soup.title.get_text(" ", strip=True)
+    except Exception:
+        pass
+    return ""
+
+def keyword_overlap_score(query_keywords: list[str], title: str, query_text: str = "") -> float:
+    """
+    BUGFIX ("pib check not working properly"): this returned a hard 0.0
+    whenever extract_keywords() found nothing to extract -- which
+    happens for short or stopword-heavy headlines -- so those headlines
+    could never match a real PIB post no matter how relevant, since 0.0
+    never clears MATCH_THRESHOLD. When there are no usable keywords we
+    now fall back to raw string similarity (via the existing
+    similarity() helper) between the original query text and the
+    candidate title, at a reduced weight, instead of an automatic zero.
+    """
+    title_words = set(re.findall(r"[a-zA-Z0-9]{3,}", title.lower()))
+    query_set = set(query_keywords)
+    if not query_set or not title_words:
+        return similarity(query_text, title) * 0.5 if query_text and title else 0.0
+    intersection = query_set & title_words
+    union = query_set | title_words
+    jaccard = len(intersection) / len(union) if union else 0.0
+    coverage = len(intersection) / len(query_set)  # how much of the claim is represented
+    return (jaccard * 0.4) + (coverage * 0.6)
+
+FAKE_VERDICT_PATTERNS = (
+    r"❌", r"\bfake\b", r"\bmisleading\b", r"\bmorphed\b", r"\bfabricated\b",
+    r"\bfalse\b", r"\buntrue\b", r"\bbaseless\b", r"\bhoax\b", r"\brumou?r\b",
+    r"\bdoctored\b", r"\bdistorted\b", r"\bno such\b", r"\bdoes not exist\b",
+    r"\bnot true\b", r"\bnot correct\b",
+)
+REAL_VERDICT_PATTERNS = (
+    r"✅", r"\bgenuine\b", r"\btrue claim\b", r"\bconfirmed\b",
+    r"\bauthentic\b", r"\baccurate\b", r"\bcorrect claim\b",
+)
+
+def parse_pib_verdict(title: str, snippet: str = "") -> Optional[str]:
+    """
+    BUGFIX ("pib check not working properly"): the old version matched
+    fixed-order substrings like "false claim", which misses the extremely
+    common real-world phrasing "the claim is false" (same words, reverse
+    order) -- so PIB pages that clearly stated a claim was false were
+    routinely scored as having no identifiable verdict. Word-boundary
+    regexes match the words regardless of order or surrounding sentence
+    structure. The overly-broad "does not" marker (matched almost any
+    negative sentence, verdict or not) has been dropped in favor of more
+    specific phrasings.
+    """
+    text = f"{title} {snippet}".lower()
+
+    fake_hits = sum(1 for pat in FAKE_VERDICT_PATTERNS if re.search(pat, text))
+    real_hits = sum(1 for pat in REAL_VERDICT_PATTERNS if re.search(pat, text))
+
+    # Require a clear majority, not just any single match, to avoid
+    # misreading a post that merely *quotes* the claim being debunked.
+    if fake_hits > real_hits and fake_hits >= 1:
+        return "Fake"
+    if real_hits > fake_hits and real_hits >= 1:
+        return "Real"
+    return None
+def search_related_urls(query: str, max_results: int = 8) -> list[str]:
+    """
+    Searches the web for coverage of a claim using DuckDuckGo's HTML
+    endpoint (no API key required, no AI model involved). Returns a
+    list of result URLs reporting on the topic.
+    """
+    if not query.strip():
+        return []
+    try:
+        response = requests.post(
+            SEARCH_ENGINE_URL,
+            data={"q": query},
+            timeout=REQUEST_TIMEOUT,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/151 Safari/537.36"
+                )
+            },
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Search engine request failed: %s", exc)
+        return []
+
+    try:
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception as exc:
+        logger.warning("Search result parsing failed: %s", exc)
+        return []
+
+    urls = []
+    for link in soup.select("a.result__a, a.result__url"):
+        href = link.get("href", "")
+        parsed = urlparse(href)
+        # DuckDuckGo HTML wraps outbound links in a redirect param; unwrap it.
+        if parsed.netloc == "" and "uddg=" in href:
+            qs = parse_qs(parsed.query)
+            real = qs.get("uddg", [""])[0]
+            if real:
+                href = unquote(real)
+        if href.startswith("http") and href not in urls:
+            urls.append(href)
+        if len(urls) >= max_results:
+            break
+
+    return urls
+
+def domain_reputation(hostname: str) -> Optional[str]:
+    if not hostname:
+        return None
+    h = hostname.lower()
+    for trusted in TRUSTED_NEWS_DOMAINS:
+        if h == trusted or h.endswith("." + trusted):
+            return "trusted"
+    if any(p in h for p in SHADY_NEWS_PATTERNS):
+        return "shady"
+    return None
 
 @app.get("/")
 def root():
     return {
         "service": "TrustGuard ML Service",
-        "version": "5.2.0",
+        "version": "5.2.1",
         "status": model_status(),
     }
 
@@ -2181,10 +3099,9 @@ def models_status():
     return model_status()
 
 @app.post("/analyze/news")
-def analyze_news(
-    payload: NewsPayload,
-    x_gemini_api_key: Optional[str] = Header(default=None),
-):
+def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(default=None)):
+    
+    
     headline = clean_text(payload.headline)
     article_url = clean_text(payload.article_url)
     article_text = clean_text(payload.article_text)
@@ -2258,15 +3175,57 @@ def analyze_news(
 
     # Always-available zero-dependency stylometric voter -- keeps the
     # ensemble multi-model even when Kaggle/BERTPhish/Gemini are all down.
-    predictions.append(
-        heuristic_news_vote(headline, article_text, make_prediction)
-    )
+    heuristic_vote = heuristic_news_vote(headline, article_text, make_prediction)
+    if heuristic_vote:
+        predictions.append(heuristic_vote)
     predictions.extend(hf_news_predictions(content))
-        # Independently search the web for other coverage of this story and
-    # run the SAME local ML model against each one found. This is a real
-    # second opinion from separate sources, not just a link list.
 
     style = classify_style(headline, article_text)
+
+    # BUGFIX: this used to call check_article_url_trust(...) TWICE (once
+    # as `url_trust`, then again immediately as `embedded_url_trust`) and
+    # appended the "URL Trust Analysis" prediction under each call if the
+    # URL looked untrustworthy -- silently double-counting that voter's
+    # weight in the ensemble poll. It is now computed once and voted once.
+    embedded_url_trust = check_article_url_trust(headline, article_text, article_url)
+    if embedded_url_trust["anyUntrustworthy"]:
+        predictions.append(
+            make_prediction("URL Trust Analysis", "Fake", 0.7,
+                             source="heuristic", weight=1.3)
+        )
+
+    # PIB fact-check — independent voter, runs regardless of URLs present.
+    pib = pib_fact_check(headline, article_text)
+    if pib.get("covered") and pib["label"] in {"Real", "Fake"}:
+        predictions.append(
+            make_prediction("PIB Fact Check", pib["label"], None,
+                             source="pib", weight=1.5)
+        )
+
+    # Search-coverage trust — independent voter, only meaningful when the
+    # article/headline supplied no links of its own to check directly.
+        # Search-coverage trust — independent voter, only meaningful when the
+    # article/headline supplied no links of its own to check directly.
+    search_url_trust = None
+    if not embedded_url_trust["checked"]:
+        search_url_trust = search_based_url_trust(headline, article_text)
+        if search_url_trust.get("coverageFound"):
+            total = search_url_trust["totalChecked"]
+            trust_ratio = search_url_trust["trustedCount"] / total if total else 0
+            
+            if total >= 3:
+                if trust_ratio >= 0.6:
+                    predictions.append(
+                        make_prediction("Search Coverage Trust", "Real",
+                                         trust_ratio, source="heuristic", weight=1.2)
+                    )
+                elif trust_ratio <= 0.35:
+                    predictions.append(
+                        make_prediction("Search Coverage Trust", "Fake",
+                                         1 - trust_ratio, source="heuristic", weight=1.2)
+                    )
+        
+
     # Gemini is an independent verification voter only when it actually
     # returns a classification. It does not receive fake confidence.
     gemini = gemini_news_check(
@@ -2330,6 +3289,9 @@ def analyze_news(
         )
     except Exception as exc:
         logger.warning("[SYNTHESIS] failed, continuing without it: %s", exc)
+
+
+
     return {
         "success": True,
         "label": winner,
@@ -2366,6 +3328,17 @@ def analyze_news(
             "explanation": gemini["explanation"],
             "sources": gemini["sources"],
         },
+        "pibFactCheck": {
+            "available": pib["available"],
+            "covered": pib.get("covered", False),
+            "vote": pib["label"],
+            "explanation": pib["explanation"],
+            "sources": pib.get("sources", []),
+        },
+        "urlTrust": {
+            "embedded": embedded_url_trust,
+            "searchBased": search_url_trust,
+        },
         "relatedNews": related_sources,
         "claim": structured_claim.to_dict() if structured_claim else None,
         "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
@@ -2395,9 +3368,9 @@ def analyze_review(payload: TextPayload):
     )
 
     # Always-available zero-dependency spam-pattern voter, called once.
-    predictions.append(
-        heuristic_review_vote(content, make_prediction)
-    )
+    heuristic_vote = heuristic_review_vote(content, make_prediction)
+    if heuristic_vote:
+        predictions.append(heuristic_vote)
 
     poll = model_poll(predictions, "Fake Review")
     winner = poll["winner"]
@@ -2461,22 +3434,32 @@ def analyze_review_page(payload: ReviewPagePayload):
         except HTTPException:
             continue
 
-    total = len(results) or 1
     fake_count = sum(1 for r in results if r["label"] == "Fake")
-    fake_ratio = fake_count / total
+    total = len(results)
+    fake_ratio = fake_count / total if total else 0.0
 
     rating_skew = None
     if payload.ratings:
-        numeric_ratings = [r for r in payload.ratings if isinstance(r, (int, float))]
+        numeric_ratings = [
+            float(r)
+            for r in payload.ratings
+            if isinstance(r, (int, float)) and 0 <= float(r) <= 5
+        ]
         if numeric_ratings:
-            five_star_pct = sum(1 for r in numeric_ratings if r >= 4.5) / len(numeric_ratings)
+            five_star_pct = sum(r >= 4.5 for r in numeric_ratings) / len(numeric_ratings)
             rating_skew = (
                 "Suspicious (rating-bombed toward 5 stars)"
                 if five_star_pct > 0.85
                 else "Normal distribution"
             )
 
-    verdict = "Likely Fake Reviews Present" if fake_ratio > 0.4 else "Reviews Look Genuine"
+    verdict = (
+        "Insufficient Review Data"
+        if not results
+        else "Likely Fake Reviews Present"
+        if fake_ratio > 0.4
+        else "Reviews Look Genuine"
+    )
 
     return {
         "success": True,
@@ -2519,7 +3502,8 @@ def analyze_phishing(payload: UrlPayload):
     checklist_vote, checklist = heuristic_phishing_vote(
         url, data["hostname"], bool(data["ssl"]), bool(data["shady_tld"]), make_prediction
     )
-    predictions.append(checklist_vote)
+    if checklist_vote:
+        predictions.append(checklist_vote)
 
     poll = model_poll(predictions, "Phishing")
     winner = poll["winner"]
@@ -2765,6 +3749,9 @@ def model_status():
         "pretrainedDirectory": str(PRETRAINED_DIR),
         "modelErrors": MODEL_ERRORS[-50:],
         "loadEvents": MODEL_LOAD_EVENTS[-100:],
+        "newsRegistry": {
+            "adapterCount": len(news_registry.for_task("news")),
+        },
     }
 
 @app.get("/analyze/health")

@@ -1,370 +1,1146 @@
 # 🛡️ TrustGuard
 
-TrustGuard is a digital-intelligence and content-verification platform that combines machine-learning models, ensemble voting, Gemini-assisted verification, and web evidence to analyze:
+### AI-Powered Multi-Signal Platform for News, Review & Phishing Verification
 
-- 📰 Fake news
-- ⭐ Fake reviews
-- 🔗 Phishing URLs
+TrustGuard is a full-stack digital intelligence and verification platform that analyzes **news claims, product reviews, and URLs** using multiple independent machine-learning models, evidence sources, and security signals.
 
-The project is designed as a full-stack application with a React frontend, Node.js API gateway, and Python/FastAPI ML inference service.
+Instead of depending on a single AI model, TrustGuard combines:
+
+* 🧠 Local machine-learning models
+* 🤗 Hugging Face models
+* 📦 Kaggle / pretrained models
+* 🏛️ PIB Fact Check
+* 🔍 Search Coverage Trust
+* 🌐 URL and domain analysis
+* 📰 Related article analysis
+* 🔗 Source-independence clustering
+* ⏱️ Temporal/currentness analysis
+* ✨ Optional Gemini verification
+* 🐍 Offline Python fallback verification
+* ⚖️ Weighted ensemble voting
+* 📡 Real-time Server-Sent Events (SSE)
+
+The goal is to provide an **explainable, evidence-driven assessment** instead of treating one model's prediction as absolute truth.
 
 ---
 
-## ✨ Features
+# 📌 Table of Contents
 
-### 📰 News Verification
+* [Overview](#-overview)
+* [Core Features](#-core-features)
+* [System Architecture](#-system-architecture)
+* [News Analysis](#-news-analysis)
+* [PIB Fact Check](#-pib-fact-check)
+* [Search Coverage Trust](#-search-coverage-trust)
+* [Review Analysis](#-review-analysis)
+* [Phishing Detection](#-phishing-detection)
+* [Machine Learning Layer](#-machine-learning-layer)
+* [Gemini Integration](#-gemini-integration)
+* [Weighted Ensemble](#-weighted-ensemble)
+* [Evidence Normalization](#-evidence-normalization)
+* [Live SSE Analysis](#-live-sse-analysis)
+* [Project Structure](#-project-structure)
+* [Technology Stack](#-technology-stack)
+* [Installation](#-installation)
+* [Environment Configuration](#-environment-configuration)
+* [Running the Application](#-running-the-application)
+* [API Reference](#-api-reference)
+* [Health & Diagnostics](#-health--diagnostics)
+* [Security](#-security)
+* [Reliability & Fallbacks](#-reliability--fallbacks)
+* [Troubleshooting](#-troubleshooting)
+* [Development Workflow](#-development-workflow)
+* [Roadmap](#-roadmap)
+* [Disclaimer](#-disclaimer)
+* [License](#-license)
 
-TrustGuard can analyze news using:
+---
 
-- Headline only
-- Article URL
-- Article text
-- Headline + URL
-- Headline + article text
-- URL + article text
-- All available inputs together
+# 🔎 Overview
+
+TrustGuard is designed around a simple principle:
+
+> **Verification should be based on multiple independent signals rather than a single prediction.**
+
+For example, if a news claim is classified as `Fake` by one ML model, TrustGuard does not automatically treat the claim as fake.
+
+Instead, it can compare:
+
+```text
+Local ML
+   +
+Hugging Face
+   +
+Kaggle Model
+   +
+PIB Fact Check
+   +
+Search Coverage
+   +
+Related Articles
+   +
+Source Trust
+   +
+Temporal Analysis
+   +
+Optional Gemini
+        │
+        ▼
+Weighted Evidence
+        │
+        ▼
+Final Assessment
+```
+
+This architecture makes the system more resilient to:
+
+* Incorrect ML predictions
+* Missing models
+* Search failures
+* Gemini quota exhaustion
+* Missing PIB coverage
+* Conflicting evidence
+* Unavailable external services
+
+---
+
+# ✨ Core Features
+
+## 📰 News Verification
+
+Analyze:
+
+* News headlines
+* Article URLs
+* Article text
+* Claims
+* Currentness
+* Related coverage
 
 The news pipeline can combine:
 
-1. Local TF-IDF + Logistic Regression model
-2. Kaggle fake-news model
-3. Gemini verification
-4. Google Search grounding/evidence
-5. Related news/source discovery
-6. Translation and summarization support
-7. Ensemble polling
-
-The final result is selected from the models that actually return a valid prediction.
-
----
-
-### ⭐ Fake Review Detection
-
-The review module supports:
-
-- Local review classifier
-- Local TF-IDF vectorizer
-- Kaggle fake-review model
-- Vectorization pipeline
-- Scaling pipeline
-- Ensemble voting
-
-The system reports:
-
-- Genuine/Fake classification
-- Confidence
-- Spam score
-- Readability information
-- Individual model predictions
-- Final poll winner
+* Local ML classifiers
+* Hugging Face models
+* Kaggle/pretrained models
+* PIB Fact Check
+* Search Coverage Trust
+* URL analysis
+* Related articles
+* Source clustering
+* Temporal classification
+* Gemini verification
+* Offline fallback
 
 ---
 
-### 🔗 Phishing URL Detection
+## ⭐ Review Analysis
 
-The phishing module analyzes URLs using URL-based security features.
+Analyze product reviews for signals associated with:
 
-Supported model types include:
+* Genuine reviews
+* Suspicious reviews
+* Fake/repetitive reviews
+* Review manipulation patterns
 
-- Local Random Forest model
-- Kaggle Random Forest phishing model
-- Optional BERTPhish/Transformers model
-
-The system can inspect:
-
-- HTTPS usage
-- URL length
-- Domain structure
-- Suspicious keywords
-- Special characters
-- TLD characteristics
-- Host/domain properties
-- Model-specific feature sets
-
-The system does **not** assume that models with different feature counts use the same feature order. Model-specific adapters are used where required.
-
----
-
-# 🏗️ Architecture
+The review pipeline can combine:
 
 ```text
-                         ┌─────────────────────┐
-                         │    React Frontend   │
-                         │       Vite          │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │  Node.js API        │
-                         │  Express Gateway    │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │ Python ML Service   │
-                         │ FastAPI / Uvicorn   │
-                         └──────────┬──────────┘
-                                    │
-              ┌─────────────────────┼─────────────────────┐
-              │                     │                     │
-              ▼                     ▼                     ▼
-          📰 NEWS                ⭐ REVIEW            🔗 PHISHING
-              │                     │                     │
-       ┌──────┼──────┐       ┌──────┼──────┐       ┌──────┼──────┐
-       │      │      │       │      │      │       │      │      │
-     Local  Kaggle Gemini   Local  Kaggle  ...   Local  Kaggle BERT*
-       │      │      │       │      │              │      │
-       └──────┴──────┘       └──────┴──────┘       └──────┴──────┘
-              │                     │                     │
-              └─────────────────────┼─────────────────────┘
-                                    ▼
-                            ┌─────────────────┐
-                            │  MODEL POLL     │
-                            │  / ENSEMBLE     │
-                            └────────┬────────┘
-                                     │
-                                     ▼
-                              FINAL RESULT
+Local ML
+   +
+Kaggle / pretrained models
+   +
+Writing-style heuristics
+   +
+Ensemble voting
 ```
-
-`* BERTPhish is optional and depends on a compatible PyTorch, torchvision, and Transformers environment.`
 
 ---
 
-# 📁 Project Structure
+## 🔗 Phishing Detection
 
-Recommended structure:
+Analyze URLs for phishing and malicious characteristics.
+
+Signals can include:
+
+* URL structure
+* Suspicious domains
+* Domain characteristics
+* Typosquatting
+* IP-based URLs
+* Suspicious paths
+* Redirect patterns
+* Security indicators
+* Local ML
+* Kaggle/pretrained models
+* Optional BERTPhish
+
+---
+
+# 🏗️ System Architecture
 
 ```text
-Trust-Guard/
-│
-├── TrustGuard/
-│   │
-│   ├── ml-service/
-│   │   ├── main.py
-│   │   ├── .env
-│   │   ├── requirements.txt
-│   │   │
-│   │   ├── models/
-│   │   │   ├── news_model.joblib
-│   │   │   ├── news_vectorizer.joblib
-│   │   │   ├── review_model.joblib
-│   │   │   ├── review_vectorizer.joblib
-│   │   │   └── local_phishing_model.joblib
-│   │   │
-│   │   └── pretrained_models/
-│   │       └── model_paths.json
-│   │
-│   ├── server/
-│   │   ├── routes/
-│   │   ├── controllers/
-│   │   └── ...
-│   │
-│   └── frontend/
-│       ├── src/
-│       ├── public/
-│       ├── package.json
-│       └── ...
-│
-├── .gitignore
-└── README.md
-```
+                         ┌──────────────────────────────┐
+                         │       REACT FRONTEND         │
+                         │            Vite              │
+                         │                              │
+                         │  • News Analysis             │
+                         │  • Review Analysis            │
+                         │  • Phishing Analysis         │
+                         │  • Live Progress / Results   │
+                         └──────────────┬───────────────┘
+                                        │
+                         REST API ──────┼────── SSE
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │       NODE.JS API            │
+                         │       EXPRESS GATEWAY        │
+                         │                              │
+                         │  • API Routing               │
+                         │  • Request Validation        │
+                         │  • CORS / Security           │
+                         │  • Python Service Proxy      │
+                         │  • SSE Streaming             │
+                         └──────────────┬───────────────┘
+                                        │
+                                        │ HTTP / REST
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │      PYTHON ML SERVICE       │
+                         │       FASTAPI / UVICORN      │
+                         │                              │
+                         │  • Model Orchestration       │
+                         │  • Evidence Collection       │
+                         │  • Ensemble Voting           │
+                         │  • News Verification         │
+                         │  • Review Classification     │
+                         │  • Phishing Detection        │
+                         └──────────────┬───────────────┘
+                                        │
+                 ┌──────────────────────┼──────────────────────┐
+                 │                      │                      │
+                 ▼                      ▼                      ▼
+       ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+       │   📰 NEWS        │   │   ⭐ REVIEW      │   │  🔗 PHISHING     │
+       │    ANALYSIS      │   │    ANALYSIS      │   │    ANALYSIS      │
+       └────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+                │                      │                      │
+        ┌───────┼────────┐      ┌──────┼──────┐       ┌───────┼────────┐
+        │       │        │      │      │      │       │       │        │
+        ▼       ▼        ▼      ▼      ▼      ▼       ▼       ▼        ▼
+      Local    HF     Kaggle  Local  Kaggle  Style  Local   Kaggle   BERT*
+       ML    Models   Models    ML    Models  /Heur.  ML     Models  Phish
+        │       │        │      │      │      │       │       │        │
+        └───────┴────────┘      └──────┴──────┘       └───────┴────────┘
+                │                      │                      │
+                └──────────────────────┼──────────────────────┘
+                                       │
+                                       ▼
+                         ┌──────────────────────────────┐
+                         │       EVIDENCE LAYER         │
+                         │                              │
+                         │  🏛️ PIB FACT CHECK          │
+                         │  🔍 SEARCH COVERAGE TRUST    │
+                         │  🌐 URL / DOMAIN TRUST       │
+                         │  📰 RELATED ARTICLES         │
+                         │  ⏱️ TEMPORAL CURRENTNESS     │
+                         │  🔗 SOURCE INDEPENDENCE      │
+                         └──────────────┬───────────────┘
+                                        │
+                       ┌────────────────┴────────────────┐
+                       │                                 │
+                       ▼                                 ▼
+             ┌────────────────────┐           ┌────────────────────┐
+             │  🏛️ PIB FACT       │           │  🔍 SEARCH         │
+             │     CHECK          │           │     COVERAGE       │
+             │                    │           │                    │
+             │ • Claim Matching   │           │ • Related Sources  │
+             │ • Verdict Match    │           │ • Domain Trust     │
+             │ • Relevance Check  │           │ • Source Diversity │
+             │ • Confidence       │           │ • Trust Ratio      │
+             │ • No Match =       │           │ • No Evidence =    │
+             │   NO VOTE          │           │   NO VOTE          │
+             └──────────┬─────────┘           └──────────┬─────────┘
+                        │                                │
+                        └────────────────┬───────────────┘
+                                         │
+                                         ▼
+                         ┌──────────────────────────────┐
+                         │     OPTIONAL GEMINI          │
+                         │      VERIFICATION            │
+                         │                              │
+                         │  • Claim Analysis             │
+                         │  • Search Grounding            │
+                         │  • Source Cross-checking       │
+                         │  • Independent Assessment      │
+                         │                              │
+                         │  If unavailable / 429:         │
+                         │  → Offline Python fallback     │
+                         └──────────────┬───────────────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │     EVIDENCE NORMALIZATION   │
+                         │                              │
+                         │  • Confidence Normalization  │
+                         │  • Voter Validation           │
+                         │  • Duplicate Removal          │
+                         │  • Source Deduplication      │
+                         │  • Invalid Vote Filtering     │
+                         │                              │
+                         │  REAL / FAKE / NO VOTE       │
+                         └──────────────┬───────────────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │     WEIGHTED ENSEMBLE        │
+                         │       MODEL POLL             │
+                         │                              │
+                         │  confidence × voter weight   │
+                         │                              │
+                         │  • Model Agreement           │
+                         │  • Evidence Strength          │
+                         │  • Voter Reliability          │
+                         │  • Weighted Share             │
+                         │  • Vote Margin                │
+                         │  • Tie Detection              │
+                         │  • Unanimous Detection        │
+                         └──────────────┬───────────────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │     CROSS-EVIDENCE           │
+                         │        SYNTHESIS             │
+                         │                              │
+                         │  • Compare independent       │
+                         │    evidence sources          │
+                         │  • Resolve conflicting       │
+                         │    signals                   │
+                         │  • Calculate final confidence│
+                         │  • Build explanation          │
+                         └──────────────┬───────────────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │         FINAL RESULT         │
+                         │                              │
+                         │  🟢 REAL / 🔴 FAKE / ⚪      │
+                         │     INCONCLUSIVE             │
+                         │                              │
+                         │  • Winner                    │
+                         │  • Confidence                │
+                         │  • Vote Ratio                │
+                         │  • Weighted Share            │
+                         │  • Vote Margin               │
+                         │  • Tie Flag                  │
+                         │  • Per-model Breakdown       │
+                         │  • PIB Evidence              │
+                         │  • Search Coverage           │
+                         │  • Related Sources            │
+                         │  • Supporting Evidence        │
+                         └──────────────┬───────────────┘
+                                        │
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │       REACT RESULT UI        │
+                         │                              │
+                         │  • Verdict Card              │
+                         │  • Confidence Meter          │
+                         │  • Model Poll                │
+                         │  • Evidence Dashboard        │
+                         │  • Source Clusters            │
+                         │  • Related Articles          │
+                         │  • Live Analysis Timeline    │
+                         └──────────────────────────────┘
 
-Your exact frontend/backend folder names may differ; the important requirement is that the Python service can locate its `models/` directory.
+
+        * BERTPhish = Optional phishing model
+```
 
 ---
 
-# 🤖 Models
+# 📰 News Analysis
+
+The news pipeline is designed as a multi-stage evidence workflow.
+
+```text
+USER CLAIM / ARTICLE
+        │
+        ▼
+CLAIM EXTRACTION
+        │
+        ├──────────────► TEMPORAL / CURRENTNESS
+        │
+        ├──────────────► LOCAL ML MODELS
+        │
+        ├──────────────► HUGGING FACE MODELS
+        │
+        ├──────────────► KAGGLE / PRETRAINED MODELS
+        │
+        ├──────────────► PIB FACT CHECK
+        │
+        ├──────────────► SEARCH COVERAGE TRUST
+        │
+        ├──────────────► RELATED ARTICLES
+        │
+        ├──────────────► SOURCE CLUSTERING
+        │
+        └──────────────► GEMINI VERIFICATION
+                              │
+                              ▼
+                       OFFLINE FALLBACK
+                              │
+                              ▼
+                     EVIDENCE NORMALIZATION
+                              │
+                              ▼
+                       WEIGHTED ENSEMBLE
+                              │
+                              ▼
+                      CROSS-EVIDENCE
+                        SYNTHESIS
+                              │
+                              ▼
+                       FINAL VERDICT
+```
+
+---
+
+# 🏛️ PIB Fact Check
+
+PIB Fact Check is treated as an **evidence voter**, not as a generic ML model.
+
+The system attempts to identify an official PIB fact-check that is genuinely relevant to the supplied claim.
+
+## PIB workflow
+
+```text
+Claim
+  │
+  ▼
+Headline / keyword extraction
+  │
+  ▼
+PIB discovery
+  │
+  ▼
+Candidate fact-checks
+  │
+  ▼
+Content retrieval
+  │
+  ▼
+Claim + verdict matching
+  │
+  ▼
+Relevance validation
+  │
+  ▼
+PIB vote
+```
+
+The system should consider:
+
+* Claim similarity
+* Important entities
+* Distinctive keywords
+* Explicit fact-check verdict language
+* Page relevance
+* Source authenticity
+
+### Important rule
+
+```text
+No PIB match
+     ↓
+NO VOTE
+```
+
+It must **not** become:
+
+```text
+No PIB match
+     ↓
+FAKE
+```
+
+because PIB does not fact-check every claim.
+
+---
+
+# 🔍 Search Coverage Trust
+
+Search Coverage Trust determines whether independent online coverage supports or contradicts a claim.
+
+```text
+Claim
+  │
+  ▼
+Search providers
+  │
+  ▼
+Search results
+  │
+  ▼
+Source extraction
+  │
+  ▼
+Domain classification
+  │
+  ▼
+Source trust evaluation
+  │
+  ▼
+Independent coverage
+  │
+  ▼
+Trust ratio
+  │
+  ▼
+Coverage vote
+```
+
+The system can consider:
+
+* Number of usable sources
+* Source reputation
+* Government sources
+* Established news organizations
+* Domain characteristics
+* Source diversity
+* Duplicate sources
+* Suspicious domains
+* Lookalike domains
+
+### Coverage voting
+
+A simplified model:
+
+```text
+Trusted coverage >= 60%
+        ↓
+      REAL
+
+Trusted coverage <= 35%
+        ↓
+      FAKE
+
+35% < coverage < 60%
+        ↓
+     NO VOTE
+```
+
+A minimum amount of usable coverage should exist before Search Coverage contributes a vote.
+
+Therefore:
+
+```text
+No search results
+       ≠
+     FAKE
+```
+
+This distinction is critical for avoiding false conclusions.
+
+---
+
+# ⭐ Review Analysis
+
+Review analysis uses a combination of:
+
+```text
+Review Text
+     │
+     ├──► Local ML
+     │
+     ├──► Kaggle / pretrained model
+     │
+     ├──► Writing-style heuristics
+     │
+     └──► Ensemble
+             │
+             ▼
+        Final Assessment
+```
+
+Potential signals include:
+
+* Repetition
+* Extreme sentiment
+* Generic language
+* Suspicious wording
+* Review structure
+* Model classification
+* Confidence
+
+---
+
+# 🔗 Phishing Detection
+
+The phishing pipeline focuses on URL-level risk.
+
+```text
+URL
+ │
+ ├──► URL Parser
+ │
+ ├──► Structural Features
+ │
+ ├──► Domain Analysis
+ │
+ ├──► Suspicious Pattern Detection
+ │
+ ├──► Local ML
+ │
+ ├──► Pretrained Models
+ │
+ └──► Optional BERTPhish
+          │
+          ▼
+     Weighted Result
+```
+
+Potential URL indicators include:
+
+* Excessive subdomains
+* IP addresses instead of domains
+* Suspicious URL length
+* Encoded characters
+* Unusual ports
+* Typosquatting
+* Suspicious TLD patterns
+* Login/payment terminology
+* Redirect behavior
+* Domain trust signals
+
+---
+
+# 🤖 Machine Learning Layer
+
+TrustGuard supports multiple model sources.
 
 ## Local Models
 
-The current local ML service supports:
-
-| Module | Model | Vectorizer/Features |
-|---|---|---|
-| News | Logistic Regression | TF-IDF |
-| Review | Multinomial Naive Bayes | TF-IDF |
-| Phishing | Random Forest | URL features |
-
-The local models are loaded from:
+Example:
 
 ```text
-ml-service/models/
+models/
+├── news_model.joblib
+├── news_vectorizer.joblib
+├── review_model.joblib
+├── review_vectorizer.joblib
+└── local_phishing_model.joblib
 ```
 
-Expected files:
+Typical local approaches include:
 
-```text
-news_model.joblib
-news_vectorizer.joblib
-
-review_model.joblib
-review_vectorizer.joblib
-
-local_phishing_model.joblib
-```
+* Logistic Regression
+* Naive Bayes
+* Random Forest
+* TF-IDF vectorization
 
 ---
 
-## Kaggle Models
+## 🤗 Hugging Face
 
-The project can integrate downloaded Kaggle models through `kagglehub`.
+Additional transformer-based models can be enabled for news classification.
 
-Current model sources used by the project include:
+Models are loaded independently.
 
-```text
-thedeveloper306/fake-review-detector-model
-saitejabandaruin/truthlens
-angelchaudhary/fake-news-detection-model
-lucasrobson/bertphish
-christinecoomans/phishing_detection_random_forest_v1
-```
+If one model:
 
-Kaggle model downloads generally return a **directory**, not a single `.joblib` file.
+* Cannot be downloaded
+* Is private
+* Has changed
+* Is incompatible
+* Times out
 
-Therefore the loader searches the downloaded directory and handles different model formats separately.
+the remaining pipeline should continue.
 
-### Fake News
+---
 
-Expected bundle:
+## 📦 Kaggle / Pretrained Models
+
+TrustGuard can discover compatible pretrained artifacts.
+
+Example files may include:
 
 ```text
 fake_news_model.pkl
 tfidf_vectorizer.pkl
-```
 
-Both files must be used together.
-
-### Fake Reviews
-
-Expected bundle:
-
-```text
 Review_classifier_LG.pkl
 scaling_pipeline.pkl
 vectorization_pipeline.pkl
 ```
 
-These are treated as a single model pipeline.
+Models are validated before being used.
 
-### Phishing
+An incompatible model should result in:
 
-The Kaggle phishing model may require a different feature count from the local model.
+```text
+MODEL_UNAVAILABLE
+```
+
+rather than bringing down the complete service.
+
+---
+
+# ✨ Gemini Integration
+
+Gemini is an **optional external verification layer**.
+
+It can be used for:
+
+* Claim verification
+* Source analysis
+* Search-grounded verification
+* Article interpretation
+* Translation
+* Summarization
+* Cross-evidence reasoning
+
+Gemini should not be treated as the only source of truth.
+
+---
+
+## Gemini Failure Handling
+
+If Gemini returns:
+
+```text
+429 RESOURCE_EXHAUSTED
+```
+
+or becomes unavailable:
+
+```text
+Gemini
+  │
+  ├── available → Gemini verification
+  │
+  └── unavailable
+          │
+          ▼
+   Offline Python fallback
+```
+
+News analysis should continue whenever sufficient non-Gemini evidence exists.
+
+---
+
+# 🔑 Gemini API Keys
+
+Multiple keys may be configured where supported:
+
+```env
+GEMINI_API_KEYS=key_one,key_two,key_three
+```
+
+When one key reaches its quota, the system can rotate to another available key.
+
+Do not commit API keys to Git.
+
+---
+
+# ⚖️ Weighted Ensemble
+
+TrustGuard does not simply count votes.
+
+Each valid voter contributes based on:
+
+```text
+Weighted Score
+=
+Confidence × Voter Weight
+```
+
+The final result considers:
+
+* Number of valid votes
+* Confidence
+* Voter reliability
+* Evidence strength
+* Source independence
+* Weighted share
+* Vote margin
+* Tie state
+
+---
+
+## Example
+
+```text
+Local ML              → Fake   0.82
+Hugging Face          → Fake   0.76
+Kaggle                → Real   0.61
+PIB Fact Check        → Fake   0.95
+Search Coverage       → Fake   0.88
+Gemini                → Fake   0.84
+```
+
+The ensemble does not treat these as six identical votes.
+
+Evidence-backed voters can receive appropriate weights.
+
+---
+
+# 🧩 Evidence Normalization
+
+Before ensemble voting, TrustGuard normalizes evidence.
+
+```text
+Raw Predictions
+      │
+      ▼
+Validate prediction
+      │
+      ▼
+Validate confidence
+      │
+      ▼
+Remove duplicates
+      │
+      ▼
+Normalize labels
+      │
+      ▼
+Filter unavailable voters
+      │
+      ▼
+Calculate voter weights
+      │
+      ▼
+Weighted Ensemble
+```
+
+Supported states include:
+
+```text
+REAL
+FAKE
+NO VOTE
+UNAVAILABLE
+INCONCLUSIVE
+```
+
+### Important
+
+`NO VOTE` is different from `FAKE`.
 
 For example:
 
 ```text
-Local model  → 13 features
-Kaggle model → 21 features
+PIB:
+No matching fact-check
+→ NO VOTE
 ```
 
-The system must not feed the 13-feature representation into the 21-feature model.
+and:
 
-### BERTPhish
-
-BERTPhish is a Transformers/PyTorch model and is loaded separately from Joblib models.
+```text
+Search:
+Insufficient independent coverage
+→ NO VOTE
+```
 
 ---
 
-# 🗳️ Ensemble / Model Poll
+# 🔗 Source Independence
 
-TrustGuard does not simply average every configured model.
+Multiple websites repeating the same article does not necessarily mean multiple independent confirmations.
 
-A model participates in the poll **only when it successfully produces a valid prediction**.
-
-Example:
+TrustGuard therefore groups sources into clusters where possible.
 
 ```text
-MODEL POLL
-
-✓ Local News Model          REAL      91.4%
-✓ Kaggle Fake News Model    FAKE      84.7%
-✓ Gemini + Search           REAL
-
-──────────────────────────────
-
-REAL     2 votes
-FAKE     1 vote
-
-🏆 FINAL RESULT: REAL
+Source A ─┐
+Source B ─┼── Same underlying story
+Source C ─┘
+     │
+     ▼
+One evidence cluster
 ```
 
-If a model fails:
-
-```text
-⚠ BERTPhish
-  Not available
-```
-
-it is not counted as a vote.
-
-This prevents a failed or incompatible model from artificially influencing the result.
+This prevents copied articles from artificially inflating evidence.
 
 ---
 
-# 🧠 Gemini Integration
+# ⏱️ Temporal Analysis
 
-Gemini is used as an additional verification/evidence layer, particularly for news.
+News can change over time.
 
-Possible functions include:
+TrustGuard can classify whether information appears:
 
-- Claim analysis
-- News verification
-- Related news
-- Search-grounded evidence
-- Article summarization
-- Translation
-- Source comparison
+* Current
+* Recent
+* Historical
+* Undated
+* Stale
+* Time-sensitive
 
-Google Search grounding can be used to provide current web evidence to the Gemini analysis.
+Temporal analysis helps distinguish:
 
-## API Key
+```text
+Old true story
+```
 
-Create a Gemini API key using Google AI Studio.
+from:
 
-Do **not** put the key in the React frontend.
+```text
+Current false claim
+```
 
-Recommended:
+or:
+
+```text
+Old article being presented as current
+```
+
+---
+
+# 📡 Live SSE Analysis
+
+News analysis supports real-time progress using Server-Sent Events.
+
+Endpoint:
+
+```text
+POST /analyze/news/stream
+```
+
+The frontend can receive events such as:
+
+```text
+analysis_started
+
+claim_extraction_started
+claim_extracted
+
+model_started
+model_completed
+model_unavailable
+vote_added
+
+temporal_classified
+
+search_started
+search_completed
+search_skipped
+search_failed
+
+article_found
+article_extracted
+article_analyzed
+
+source_clustering_started
+source_cluster_created
+
+cross_evidence_started
+cross_evidence_completed
+
+final_result
+analysis_completed
+```
+
+---
+
+## SSE Flow
 
 ```text
 React
-  ↓
-Node.js
-  ↓
-Python
-  ↓
-Gemini
+  │
+  │ POST /analyze/news/stream
+  ▼
+Node Express
+  │
+  │ SSE Proxy
+  ▼
+Python FastAPI
+  │
+  ├── Claim
+  ├── ML
+  ├── PIB
+  ├── Search
+  ├── Articles
+  ├── Clustering
+  ├── Synthesis
+  │
+  ▼
+final_result
+  │
+  ▼
+analysis_completed
+  │
+  ▼
+React UI
 ```
 
-The Python service can use a server-side key:
+The frontend displays:
 
-```env
-GEMINI_API_KEY=YOUR_KEY
-```
+* Current stage
+* Model status
+* Live model votes
+* Related article count
+* Search progress
+* Final result
 
-It can also support a client-provided key when your authentication/backend design explicitly permits it.
+---
 
-### Security
-
-Never:
+# 📁 Project Structure
 
 ```text
-❌ commit .env
-❌ put GEMINI_API_KEY in React source
-❌ put API keys in URLs
-❌ expose API keys in GitHub
-```
-
-Add to `.gitignore`:
-
-```gitignore
-.env
-*.env
+TrustGuard/
+│
+├── client/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Navbar.jsx
+│   │   │   ├── AuthModal.jsx
+│   │   │   ├── TabNavigation.jsx
+│   │   │   ├── NewsInput.jsx
+│   │   │   ├── ReviewInput.jsx
+│   │   │   ├── PhishingInput.jsx
+│   │   │   ├── ResultCard.jsx
+│   │   │   ├── EvidenceDashboard.jsx
+│   │   │   ├── LiveAnalysisProgress.jsx
+│   │   │   └── ...
+│   │   │
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   │
+│   ├── .env
+│   ├── package.json
+│   └── vite.config.js
+│
+├── server/
+│   ├── src/
+│   │   ├── routes/
+│   │   ├── controllers/
+│   │   ├── middleware/
+│   │   └── index.js
+│   │
+│   ├── .env
+│   └── package.json
+│
+├── ml-service/
+│   ├── models/
+│   ├── pretrained_models/
+│   ├── main.py
+│   ├── requirements.txt
+│   └── .env
+│
+├── .gitignore
+└── README.md
 ```
 
 ---
 
-# ⚙️ Environment Configuration
+# 🧰 Technology Stack
+
+## Frontend
+
+```text
+React
+Vite
+Bootstrap
+CSS
+Server-Sent Events
+```
+
+## API Gateway
+
+```text
+Node.js
+Express
+REST API
+SSE Proxy
+```
+
+## ML Service
+
+```text
+Python
+FastAPI
+Uvicorn
+scikit-learn
+Joblib
+PyTorch
+Transformers
+```
+
+## Verification
+
+```text
+PIB Fact Check
+Search Coverage
+BeautifulSoup
+HTTP clients
+Gemini API
+Search providers
+```
+
+---
+
+# ⚙️ Installation
+
+## Prerequisites
+
+Install:
+
+* Node.js
+* npm
+* Python 3.x
+* pip
+* Git
+
+Optional:
+
+* CUDA-enabled PyTorch
+* Gemini API key
+* Hugging Face access
+* Kaggle access
+
+---
+
+# 1. Clone Repository
+
+```bash
+git clone <repository-url>
+cd TrustGuard
+```
+
+---
+
+# 2. Install Python Dependencies
+
+```bash
+cd ml-service
+python -m pip install -r requirements.txt
+```
+
+---
+
+# 3. Install Node Dependencies
+
+From the server:
+
+```bash
+cd ../server
+npm install
+```
+
+From the frontend:
+
+```bash
+cd ../client
+npm install
+```
+
+---
+
+# 🔧 Environment Configuration
+
+## Python `.env`
 
 Create:
 
@@ -375,181 +1151,201 @@ ml-service/.env
 Example:
 
 ```env
+HOST=127.0.0.1
+PORT=8000
+
 MODELS_DIR=models
 PRETRAINED_MODELS_DIR=pretrained_models
 
-HOST=127.0.0.1
-PORT=8000
-RELOAD=true
-
-GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+GEMINI_API_KEYS=key_one,key_two
 GEMINI_MODEL=gemini-3.6-flash
 
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 REQUEST_TIMEOUT=15
 MAX_ARTICLE_CHARS=30000
+MAX_INPUT_CHARS=100000
+
 LOG_LEVEL=INFO
 
 ENABLE_BERTPHISH=false
+ENABLE_HF_NEWS_MODELS=true
+
+HF_NEWS_MODELS=model_one,model_two
+
+ENABLE_DOMAIN_AGE_LOOKUP=false
+ENABLE_WEB_SEARCH_VERIFICATION=false
+
+MAX_SEARCH_ARTICLES_TO_FETCH=6
+SEARCH_FETCH_WORKERS=4
 ```
 
-### Important
+Use the exact variable names supported by the current backend implementation.
 
-Use:
+---
+
+# 🌐 Frontend `.env`
+
+Create:
+
+```text
+client/.env
+```
+
+Example:
 
 ```env
-MODELS_DIR=models
-PRETRAINED_MODELS_DIR=pretrained_models
-```
-
-rather than hard-coded Windows paths.
-
-The service resolves these relative to the `ml-service` directory.
-
----
-
-# 🐍 Python ML Service Setup
-
-## 1. Open the ML directory
-
-Windows PowerShell:
-
-```powershell
-cd "C:\Git PC\Trust-Guard\TrustGuard\ml-service"
-```
-
-## 2. Install dependencies
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-If `requirements.txt` is not available:
-
-```powershell
-python -m pip install fastapi uvicorn python-dotenv joblib pandas numpy scikit-learn requests beautifulsoup4 google-genai
-```
-
-Optional Transformers support:
-
-```powershell
-python -m pip install transformers accelerate safetensors
+VITE_API_URL=http://localhost:5000/api/v1
+VITE_REQUEST_TIMEOUT=120000
+VITE_GEMINI_CONNECT_URL=https://aistudio.google.com/apikey
 ```
 
 ---
 
-# ▶️ Start the ML Service
+# ▶️ Running the Application
 
-Run:
+TrustGuard is easiest to run using three terminals.
 
-```powershell
+---
+
+## Terminal 1 — Python ML Service
+
+```bash
+cd ml-service
 python main.py
 ```
 
 Expected:
 
 ```text
-Uvicorn running on http://127.0.0.1:8000
-Application startup complete.
-```
-
-The service should report model status similar to:
-
-```text
-Models ready |
-news=True |
-review=True |
-phishing=True |
-pretrained=3 |
-bertphish=False
+http://127.0.0.1:8000
 ```
 
 ---
 
-# ❤️ Health Check
+## Terminal 2 — Node.js Gateway
 
-Open:
+```bash
+cd server
+npm run dev
+```
 
-```text
-http://127.0.0.1:8000/health
+or:
+
+```bash
+npm start
 ```
 
 Expected:
 
-```json
-{
-  "status": "UP"
-}
+```text
+http://localhost:5000
 ```
 
 ---
 
-# 🔍 Model Status
+## Terminal 3 — React Frontend
+
+```bash
+cd client
+npm run dev
+```
+
+Expected:
+
+```text
+http://localhost:5173
+```
 
 Open:
 
 ```text
-http://127.0.0.1:8000/models/status
-```
-
-This endpoint should be used to verify which models are actually available.
-
-Example:
-
-```json
-{
-  "news": true,
-  "review": true,
-  "phishing": true,
-  "pretrained": 3,
-  "bertphish": false
-}
+http://localhost:5173
 ```
 
 ---
 
-# 🔌 API Endpoints
+# 🔌 API Reference
 
-## Health
+| Method | Endpoint                  | Purpose               |
+| ------ | ------------------------- | --------------------- |
+| `GET`  | `/health`                 | Service health        |
+| `GET`  | `/models/status`          | Model status          |
+| `GET`  | `/models/registry`        | Model registry        |
+| `GET`  | `/gemini/status`          | Gemini status         |
+| `GET`  | `/cache/stats`            | Cache statistics      |
+| `POST` | `/analyze/news`           | News analysis         |
+| `POST` | `/analyze/news/stream`    | Live news analysis    |
+| `POST` | `/analyze/review`         | Review analysis       |
+| `POST` | `/analyze/review/page`    | Product page analysis |
+| `POST` | `/analyze/phishing`       | Phishing analysis     |
+| `POST` | `/analyze/claim`          | Claim extraction      |
+| `POST` | `/analyze/temporal`       | Temporal analysis     |
+| `POST` | `/analyze/cluster`        | Source clustering     |
+| `POST` | `/analyze/news/translate` | Translation           |
+| `POST` | `/analyze/news/summary`   | Summarization         |
 
-```http
-GET /health
-```
+---
 
-## Model Status
-
-```http
-GET /models/status
-```
-
-## News
+# 📰 News Request
 
 ```http
 POST /analyze/news
+Content-Type: application/json
 ```
 
 Example:
 
 ```json
 {
-  "headline": "Example headline",
+  "headline": "Example news headline",
   "article_url": "https://example.com/news",
   "article_text": "Article content..."
 }
 ```
 
-At least one meaningful news input should be supplied.
+At least one meaningful input should be provided:
+
+```text
+headline
+article_url
+article_text
+```
 
 ---
 
-## Review
+# ⚡ Live News Request
+
+```http
+POST /analyze/news/stream
+```
+
+Example:
+
+```javascript
+const response = await fetch(
+  `${API_BASE_URL}/analyze/news/stream`,
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream"
+    },
+    body: JSON.stringify({
+      headline: "Example headline",
+      article_url: "https://example.com/news"
+    })
+  }
+);
+```
+
+---
+
+# ⭐ Review Request
 
 ```http
 POST /analyze/review
 ```
-
-Payload:
 
 ```json
 {
@@ -559,13 +1355,11 @@ Payload:
 
 ---
 
-## Phishing
+# 🔗 Phishing Request
 
 ```http
 POST /analyze/phishing
 ```
-
-Payload:
 
 ```json
 {
@@ -575,107 +1369,241 @@ Payload:
 
 ---
 
-# 🔗 Node.js API Gateway
+# ❤️ Health & Diagnostics
 
-The Node.js server acts as the public API gateway.
+## Health
 
-Typical flow:
-
-```text
-React
-  ↓
-http://localhost:5000/api/v1/...
-  ↓
-Node.js Express
-  ↓
-http://127.0.0.1:8000
-  ↓
-Python ML Service
+```http
+GET /health
 ```
 
-Example environment variable:
-
-```env
-PYTHON_ML_SERVICE_URL=http://127.0.0.1:8000
-```
-
-Start the Node server using your project's package scripts, commonly:
-
-```powershell
-npm install
-npm run dev
-```
-
-or:
-
-```powershell
-npm start
-```
-
-Check your `package.json` for the exact script.
+Use this to verify that the Python service is alive.
 
 ---
 
-# ⚛️ React Frontend
+## Models
 
-The frontend communicates with the Node API rather than directly exposing ML internals.
-
-Typical frontend environment:
-
-```env
-VITE_API_URL=http://localhost:5000/api/v1
+```http
+GET /models/status
 ```
 
-Run:
+Useful for identifying:
 
-```powershell
-npm install
-npm run dev
-```
-
-The Vite development server is normally:
-
-```text
-http://localhost:5173
-```
+* Loaded models
+* Failed models
+* Unavailable models
+* Active voters
+* Model loading errors
 
 ---
 
-# 🔄 News Verification Flow
+## Registry
+
+```http
+GET /models/registry
+```
+
+Shows registered model adapters.
+
+---
+
+## Gemini
+
+```http
+GET /gemini/status
+```
+
+Useful for checking:
+
+* Configured keys
+* Active key
+* Cooldowns
+* Quota-related failures
+
+---
+
+## Cache
+
+```http
+GET /cache/stats
+```
+
+Shows relevant cache information.
+
+---
+
+# 🛡️ Reliability & Fallbacks
+
+TrustGuard is designed to continue operating when optional components fail.
 
 ```text
-User enters:
+                 ┌───────────────┐
+                 │  News Claim   │
+                 └───────┬───────┘
+                         │
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+       ML               PIB             Search
+        │                │                │
+        │             unavailable       failed
+        │                │                │
+        ▼                ▼                ▼
+    Continue          NO VOTE          NO VOTE
+        │
+        ▼
+     Ensemble
+```
 
-Headline
-   +
-URL
-   +
-Article text
-       │
-       ▼
-Normalize input
-       │
-       ├── URL extraction
-       ├── Article extraction
-       └── Text cleaning
-       │
-       ▼
-Local ML
-       │
-       ▼
-Kaggle ML
-       │
-       ▼
-Gemini + Search
-       │
-       ▼
-Evidence / Related Sources
-       │
-       ▼
-Model Poll
-       │
-       ▼
-Final Result
+Gemini:
+
+```text
+Gemini available
+      │
+      ▼
+Gemini verification
+
+Gemini unavailable
+      │
+      ▼
+Offline fallback
+```
+
+One failed model should not stop the complete analysis.
+
+---
+
+# 🚫 Failure Semantics
+
+TrustGuard distinguishes between:
+
+```text
+FAKE
+REAL
+NO VOTE
+UNAVAILABLE
+INCONCLUSIVE
+```
+
+Examples:
+
+### PIB
+
+```text
+No relevant PIB fact-check
+→ NO VOTE
+```
+
+### Search
+
+```text
+Too few independent sources
+→ NO VOTE
+```
+
+### ML
+
+```text
+Model failed to load
+→ UNAVAILABLE
+```
+
+### Conflicting evidence
+
+```text
+No clear winner
+→ INCONCLUSIVE / TIE
+```
+
+This is preferable to forcing every subsystem to produce a binary answer.
+
+---
+
+# 🔐 Security
+
+## API Keys
+
+Never commit:
+
+```text
+.env
+```
+
+or API keys to Git.
+
+Use:
+
+```text
+.gitignore
+```
+
+to protect secrets.
+
+---
+
+## Gemini Keys
+
+Do not:
+
+* Hard-code Gemini keys in React
+* Log Gemini keys
+* Commit Gemini keys
+* Return server-side keys to clients
+
+---
+
+## CORS
+
+Restrict:
+
+```env
+CORS_ORIGINS
+```
+
+to trusted frontend origins.
+
+---
+
+## SSRF Protection
+
+Because TrustGuard can fetch user-supplied URLs, production deployments should protect against:
+
+* localhost access
+* loopback addresses
+* private IP ranges
+* link-local addresses
+* internal hostnames
+* cloud metadata endpoints
+* malicious redirects
+
+---
+
+## Input Limits
+
+Large requests should be limited using:
+
+```env
+MAX_ARTICLE_CHARS
+MAX_INPUT_CHARS
+```
+
+This helps protect the service from oversized payloads.
+
+---
+
+## Rate Limiting
+
+Production deployments should apply rate limits to:
+
+```text
+/analyze/*
+```
+
+especially:
+
+```text
+/analyze/news
+/analyze/news/stream
+/analyze/phishing
 ```
 
 ---
@@ -684,264 +1612,419 @@ Final Result
 
 ## `Cannot GET /api/v1/analyze/news`
 
-The endpoint is a `POST`, not a `GET`.
-
-Correct:
-
-```http
-POST /api/v1/analyze/news
-```
-
-Opening it directly in a browser sends `GET`, which results in:
+News analysis requires:
 
 ```text
-Cannot GET /api/v1/analyze/news
+POST
+```
+
+not:
+
+```text
+GET
+```
+
+Opening the endpoint directly in a browser performs a GET request.
+
+---
+
+## `News analysis timed out`
+
+Check:
+
+1. Python service is running.
+2. Node gateway is running.
+3. Search providers are responding.
+4. PIB requests are not blocking the pipeline.
+5. Gemini is not being retried indefinitely.
+6. Search/article fetches have reasonable timeouts.
+7. The SSE connection is not being buffered by a proxy.
+
+Optional external services should fail independently.
+
+---
+
+## Gemini `429 RESOURCE_EXHAUSTED`
+
+This means the Gemini quota has been exhausted or rate-limited.
+
+TrustGuard should:
+
+```text
+429
+ ↓
+Rotate key if available
+ ↓
+Otherwise use offline fallback
+```
+
+Do not continuously retry the same exhausted key.
+
+---
+
+## PIB takes too long
+
+PIB verification should use:
+
+* Request timeouts
+* Limited candidate pages
+* Caching
+* Deduplication
+* Independent failure handling
+
+A slow PIB lookup should not block the entire analysis indefinitely.
+
+---
+
+## Search Coverage takes too long
+
+Search should use:
+
+* Multiple providers
+* Per-provider timeouts
+* Limited result counts
+* Limited article fetches
+* Concurrent fetching
+* Deduplication
+
+If search cannot obtain enough evidence:
+
+```text
+SEARCH → NO VOTE
+```
+
+rather than:
+
+```text
+SEARCH → FAKE
 ```
 
 ---
 
-## `Unexpected token '<'`
-
-This usually means the frontend expected JSON but received an HTML page.
-
-Typical causes:
-
-- Wrong API port
-- Wrong API URL
-- Node route not registered
-- Python service URL incorrectly configured
-- Vite/frontend server returning HTML
+## Live Analysis Does Not Update
 
 Check:
 
 ```text
-React → Node → Python
+POST /analyze/news/stream
 ```
 
-and verify each service independently.
-
----
-
-## Models show `False`
-
-Check:
+and verify that the response is:
 
 ```text
-http://127.0.0.1:8000/models/status
+Content-Type: text/event-stream
 ```
 
-Then inspect startup diagnostics.
+Also ensure the Node gateway is not buffering the stream.
 
-Make sure:
+The stream should remain active until:
 
 ```text
-ml-service/
-└── models/
+final_result
+analysis_completed
 ```
 
-contains the expected `.joblib` files.
-
 ---
 
-## `pretrained=0`
+## Multiple `/analyze/news/stream` Requests
 
-This does not necessarily mean KaggleHub failed.
-
-KaggleHub model downloads commonly return directories.
-
-The service must discover the actual model files inside those directories and load them according to their format.
-
----
-
-## BERTPhish fails
-
-BERTPhish requires a compatible:
+If the terminal shows multiple requests for a single submission:
 
 ```text
-PyTorch
-+
-torchvision
-+
-Transformers
+POST /analyze/news/stream
+POST /analyze/news/stream
+POST /analyze/news/stream
 ```
 
-environment.
+check:
 
-A common error is:
+* React effect dependencies
+* Duplicate component mounting
+* React Strict Mode behavior
+* Parent state changes
+* Re-created payload objects
+* Multiple submit handlers
+
+Only one live analysis request should normally be created per user submission.
+
+---
+
+# 🧑‍💻 Development Workflow
+
+Recommended startup order:
 
 ```text
-RuntimeError:
-operator torchvision::nms does not exist
+Terminal 1
+Python
+  ↓
+Terminal 2
+Node
+  ↓
+Terminal 3
+React
 ```
 
-This indicates an incompatible PyTorch/torchvision installation.
-
-BERTPhish is intentionally optional so that the rest of TrustGuard continues working.
-
----
-
-# 🧩 Recommended BERTPhish Environment
-
-For stability, consider running BERTPhish in a separate environment rather than changing the environment that already runs the sklearn models.
-
-Example:
-
-```powershell
-conda create -n trustguard-bert python=3.11 -y
-conda activate trustguard-bert
-```
-
-Then install a compatible PyTorch/torchvision pair and Transformers.
-
-Test:
-
-```powershell
-python -c "import torch; print(torch.__version__)"
-```
-
-```powershell
-python -c "import torchvision; print(torchvision.__version__)"
-```
-
-```powershell
-python -c "from transformers import BertForSequenceClassification; print('BERT OK')"
-```
-
-Only enable BERTPhish after those imports work.
-
----
-
-# 📊 Current Model Strategy
-
-TrustGuard intentionally distinguishes between:
-
-### Participating
+Then test:
 
 ```text
-Model successfully loaded
-+
-Model successfully predicted
+GET /health
+        ↓
+GET /models/status
+        ↓
+News analysis
+        ↓
+Live SSE
+        ↓
+Final result
 ```
 
-### Skipped
+---
+
+# 📊 Example Final Result
+
+A final result can contain information such as:
+
+```json
+{
+  "winner": "Fake",
+  "confidence": 84.6,
+  "voteRatioConfidence": 80.0,
+  "margin": 3,
+  "isTie": false,
+  "isUnanimous": false,
+  "votes": {
+    "Fake": 4,
+    "Real": 1
+  },
+  "weightedVotes": {
+    "Fake": 3.42,
+    "Real": 0.71
+  },
+  "models": [],
+  "evidence": [],
+  "sources": []
+}
+```
+
+The exact response schema may evolve with the backend implementation.
+
+---
+
+# 🗺️ Roadmap
+
+## Verification
+
+* [ ] More government fact-check sources
+* [ ] Improved claim matching
+* [ ] Better source independence detection
+* [ ] More search providers
+* [ ] Improved temporal reasoning
+
+## Machine Learning
+
+* [ ] Automated model benchmarking
+* [ ] Precision / recall / F1 dashboard
+* [ ] Learned voter weights
+* [ ] Model drift detection
+* [ ] Automatic model health monitoring
+
+## Infrastructure
+
+* [ ] Docker deployment
+* [ ] Redis/shared cache
+* [ ] Production database
+* [ ] Background workers
+* [ ] Centralized logging
+* [ ] Observability dashboard
+
+## Security
+
+* [ ] Backend authentication
+* [ ] Role-based authorization
+* [ ] Production rate limiting
+* [ ] Advanced SSRF protection
+* [ ] Secret management
+* [ ] HTTPS deployment
+
+## User Experience
+
+* [ ] Analysis history
+* [ ] Evidence timeline
+* [ ] Advanced source explorer
+* [ ] Exportable verification reports
+* [ ] Model comparison dashboard
+* [ ] Improved accessibility
+
+---
+
+# 🧠 Design Philosophy
+
+TrustGuard follows five core principles.
+
+### 1. No single model is the truth
+
+A model prediction is evidence, not absolute truth.
+
+### 2. Evidence quality matters
+
+A strong government fact-check can carry more significance than several generic classifier predictions.
+
+### 3. Missing evidence is not false evidence
 
 ```text
-Model unavailable
-OR
-Model incompatible
-OR
-Required feature pipeline unavailable
-OR
-Prediction failed
+No PIB result
+      ≠
+Fake
+
+No search coverage
+      ≠
+Fake
 ```
 
-A skipped model must **not** receive a vote.
+### 4. Independent sources matter
 
-This keeps the final ensemble result honest.
+Ten websites copying one article should not automatically count as ten independent confirmations.
 
----
+### 5. Failure should degrade gracefully
 
-# 🔐 Security Notes
+```text
+One model fails
+     ↓
+Other models continue
 
-Before deploying publicly:
+Gemini fails
+     ↓
+Offline fallback
 
-- Use authentication.
-- Restrict CORS.
-- Never expose server Gemini keys.
-- Rate-limit analysis endpoints.
-- Validate URLs before fetching.
-- Set request timeouts.
-- Limit article size.
-- Avoid SSRF when fetching arbitrary URLs.
-- Do not blindly trust extracted article content.
-- Store user-provided API keys securely if user-key support is implemented.
-- Do not commit `.env`.
-- Do not log API keys.
-- Do not expose internal model paths in production responses.
+PIB unavailable
+     ↓
+PIB NO VOTE
 
----
-
-# 🚀 Production Roadmap
-
-Recommended future improvements:
-
-- [ ] User authentication
-- [ ] User-owned Gemini API keys
-- [ ] Encrypted API-key storage
-- [ ] Redis/cache for repeated URLs
-- [ ] Rate limiting
-- [ ] Background article extraction
-- [ ] Database for analysis history
-- [ ] Model performance dashboard
-- [ ] Precision/recall/F1 tracking
-- [ ] Per-model reliability weights
-- [ ] Human feedback on predictions
-- [ ] BERTPhish isolated inference worker
-- [ ] Automatic model health monitoring
-- [ ] Docker deployment
-- [ ] HTTPS
-- [ ] Production logging/monitoring
+Search unavailable
+     ↓
+Search NO VOTE
+```
 
 ---
 
-# ⚠️ Important ML Disclaimer
+# ⚠️ Disclaimer
 
-TrustGuard provides **risk assessment and model-based analysis**, not absolute truth.
+TrustGuard is an **assistance and risk-assessment system**.
 
-A model prediction such as:
+It does not guarantee factual correctness, authenticity, or malicious intent.
+
+A result such as:
 
 ```text
 REAL
 ```
 
-does not prove that an article is true.
+does not prove that every statement in an article is true.
 
 Likewise:
 
 ```text
-PHISHING
+FAKE
 ```
 
-is a security-risk classification and should be investigated using additional evidence.
+does not automatically prove that every part of a story is false.
 
-For news verification, the strongest result should combine:
+A phishing classification indicates potential security risk and should be independently investigated before taking security-sensitive actions.
+
+Users should consider:
+
+* Original sources
+* Official announcements
+* Government fact-checks
+* Reputable journalism
+* Publication dates
+* Independent evidence
+* Context
+
+before making important decisions.
+
+---
+
+# 📄 License
+
+Add the project's selected license here before publishing.
+
+Example:
 
 ```text
-ML prediction
-+
-independent sources
-+
-current web evidence
-+
-Gemini analysis
+MIT License
 ```
 
-rather than relying on one classifier.
+if the project is released under MIT.
 
 ---
 
-# 📜 License
+# 👨‍💻 Project
 
-Add the project's intended license here before publishing the repository.
+**TrustGuard**
 
----
-
-# 👨‍💻 Development
-
-TrustGuard is built around:
+> **Multi-signal verification for a more trustworthy digital world.**
 
 ```text
 React
-Node.js
-Express
-Python
-FastAPI
-scikit-learn
-Joblib
-KaggleHub
-Google Gemini
-Transformers
-PyTorch
+  ↓
+Node.js / Express
+  ↓
+Python / FastAPI
+  ↓
+ML + Evidence + Verification
+  ↓
+Weighted Ensemble
+  ↓
+Cross-Evidence Synthesis
+  ↓
+Explainable Final Result
 ```
 
-The system is designed to remain functional even when optional models such as BERTPhish are unavailable.
+---
+
+## ⭐ Core Concept
+
+```text
+                 TRUSTGUARD
+                     │
+          ┌──────────┼──────────┐
+          │          │          │
+         NEWS       REVIEW    PHISHING
+          │          │          │
+          └──────────┼──────────┘
+                     │
+             MULTI-MODEL LAYER
+                     │
+                     ▼
+              EVIDENCE LAYER
+                     │
+       ┌─────────────┼─────────────┐
+       │             │             │
+      PIB          SEARCH        GEMINI
+   FACT CHECK     COVERAGE      OPTIONAL
+       │             │             │
+       └─────────────┼─────────────┘
+                     │
+                     ▼
+             EVIDENCE NORMALIZATION
+                     │
+                     ▼
+              WEIGHTED ENSEMBLE
+                     │
+                     ▼
+             CROSS-EVIDENCE
+                SYNTHESIS
+                     │
+                     ▼
+              FINAL VERDICT
+                     │
+                     ▼
+             EXPLAINABLE UI
+```
+
+**TrustGuard does not ask "Which model should I trust?"**
+
+It asks:
+
+> **"What evidence is available, how independent is it, how strong is it, and how much do the different signals agree?"**

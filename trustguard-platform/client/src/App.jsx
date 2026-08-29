@@ -32,9 +32,6 @@ const GEMINI_CONNECT_URL =
 const THEME_STORAGE_KEY = "trustguard:theme";
 const AUTH_STORAGE_KEY = "trustguard:user";
 
-// All colors resolve through CSS custom properties so every
-// inline-styled element here repaints instantly when the
-// person switches between light and dark theme.
 const UI = {
   cyan: "var(--accent-cyan)",
   cyanSoft: "var(--accent-cyan-soft)",
@@ -67,7 +64,11 @@ function normalizePayload(tab, payload = {}) {
   }
 
   if (tab === "review") {
-    return { ...payload, text: clean(payload.text) };
+    return {
+      ...payload,
+      text: clean(payload.text),
+      product_url: clean(payload.product_url),
+    };
   }
 
   if (tab === "phishing") {
@@ -254,7 +255,6 @@ async function request(
       ...(body ? { "Content-Type": "application/json" } : {}),
     };
 
-    // User-owned key is sent only for the current request.
     if (clean(geminiApiKey)) {
       headers["X-Gemini-API-Key"] = clean(geminiApiKey);
     }
@@ -334,9 +334,6 @@ function App() {
   });
   const [lastPayload, setLastPayload] = useState(null);
 
-  // ---------------------------------------------------------
-  // Theme (persisted, defaults to the visitor's OS preference)
-  // ---------------------------------------------------------
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "dark";
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -355,10 +352,7 @@ function App() {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   }, []);
 
-  // ---------------------------------------------------------
-  // Auth (client-side UI only; wire up to real auth when ready)
-  // ---------------------------------------------------------
-  const [authModalMode, setAuthModalMode] = useState(null); // null | "login" | "signup"
+  const [authModalMode, setAuthModalMode] = useState(null);
   const [user, setUser] = useState(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -380,7 +374,6 @@ function App() {
     window.localStorage.removeItem(AUTH_STORAGE_KEY);
   }, []);
 
-  // Gemini is intentionally kept in memory only.
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showGeminiPassword, setShowGeminiPassword] = useState(false);
@@ -389,6 +382,7 @@ function App() {
   const controllerRef = useRef(null);
   const mountedRef = useRef(true);
   const [liveMode, setLiveMode] = useState(false);
+
   const saveGeminiKey = useCallback(() => {
     const key = clean(geminiApiKey);
     if (!key) return;
@@ -415,7 +409,6 @@ function App() {
 
   const refreshHealth = useCallback(async () => {
     try {
-      // Keep compatibility with existing gateway routes.
       const data = await request("/analyze/health", { timeout: 5000 });
 
       if (!mountedRef.current) return;
@@ -486,6 +479,15 @@ function App() {
       setError("");
       setLastPayload(normalized);
 
+      // Live mode (news only) hands the request off entirely to
+      // LiveAnalysisProgress, which owns its own SSE connection and
+      // reports back via onComplete/onError. Nothing else to do here —
+      // and critically, we must NOT also fire the blocking request below,
+      // or two competing analyses would race for the same result.
+      if (activeTab === "news" && liveMode) {
+        return;
+      }
+
       try {
         const data = await request(`/analyze/${activeTab}`, {
           method: "POST",
@@ -518,6 +520,7 @@ function App() {
     [
       activeTab,
       geminiApiKey,
+      liveMode,
       loading,
       refreshHealth,
     ]
@@ -875,6 +878,7 @@ function App() {
             activeTab={activeTab}
             setActiveTab={changeTab}
           />
+
           <div
             className={`verification-seal ${loading ? "is-scanning" : result ? "is-flipped" : ""}`}
             aria-hidden="true"
@@ -890,14 +894,26 @@ function App() {
               </div>
             </div>
           </div>
+
           {activeTab === "news" && (
-  <div className="form-check form-switch mb-2">
-    <input className="form-check-input" type="checkbox" id="live-mode" checked={liveMode} onChange={(e) => setLiveMode(e.target.checked)} />
-    <label className="form-check-label small" htmlFor="live-mode" style={{ color: "var(--text-secondary)" }}>
-      Live analysis (show progress in real time)
-    </label>
-  </div>
-)}
+            <div className="form-check form-switch mb-2">
+              <input
+                className="form-check-input"
+                type="checkbox"
+                id="live-mode"
+                checked={liveMode}
+                onChange={(e) => setLiveMode(e.target.checked)}
+              />
+              <label
+                className="form-check-label small"
+                htmlFor="live-mode"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Live analysis (show progress in real time)
+              </label>
+            </div>
+          )}
+
           <div className="mt-4">
             {activeTab === "news" && (
               <NewsInput
@@ -931,22 +947,15 @@ function App() {
               aria-live="polite"
               aria-busy="true"
             >
-              <div className="scan-orbit"
-                role="status"
-              >
-                <span className="visually-hidden">
-                  Loading...
-                </span>
+              <div className="scan-orbit" role="status">
+                <span className="visually-hidden">Loading...</span>
               </div>
 
               <div className="flex-grow-1">
                 <div className="fw-semibold" style={{ color: UI.text }}>
                   Running TrustGuard analysis
                 </div>
-                <div
-                  className="small mt-1"
-                  style={{ color: UI.muted }}
-                >
+                <div className="small mt-1" style={{ color: UI.muted }}>
                   {activeTab === "news" && liveMode ? (
                     <LiveAnalysisProgress
                       streamUrl={`${API_BASE_URL}/analyze/news/stream`}
@@ -961,10 +970,13 @@ function App() {
                         setLoading(false);
                       }}
                     />
-                  )
-                    : activeTab === "review"
-                      ? "Polling compatible review models..."
-                      : "Analyzing URL features and phishing models..."}
+                  ) : activeTab === "news" ? (
+                    "Polling compatible news models and optional web evidence..."
+                  ) : activeTab === "review" ? (
+                    "Polling compatible review models..."
+                  ) : (
+                    "Analyzing URL features and phishing models..."
+                  )}
                 </div>
               </div>
 
@@ -1028,14 +1040,13 @@ function App() {
         {result && !error && (
           <>
             <div className="mb-4">
-              <ResultCard
-                result={result}
-                type={activeTab}
-              />
+              <ResultCard result={result} type={activeTab} />
             </div>
+
             {activeTab === "news" && (
               <EvidenceDashboard result={result} />
             )}
+
             {/* POLL */}
             {result.poll && (
               <SectionCard
@@ -1047,10 +1058,7 @@ function App() {
                 <div className="row g-3">
                   {Object.entries(result.poll.votes || {}).map(
                     ([label, votes]) => (
-                      <div
-                        className="col-md-6"
-                        key={label}
-                      >
+                      <div className="col-md-6" key={label}>
                         <div
                           className="p-3 rounded-3 h-100"
                           style={{
@@ -1062,11 +1070,8 @@ function App() {
                             <span className="fw-semibold" style={{ color: UI.text }}>
                               {label}
                             </span>
-                            <ToneBadge
-                              tone={labelTone(label)}
-                            >
-                              {votes} vote
-                              {votes === 1 ? "" : "s"}
+                            <ToneBadge tone={labelTone(label)}>
+                              {votes} vote{votes === 1 ? "" : "s"}
                             </ToneBadge>
                           </div>
                         </div>
@@ -1077,15 +1082,10 @@ function App() {
 
                 <div
                   className="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-4 pt-3"
-                  style={{
-                    borderTop: `1px solid ${UI.cardBorder}`,
-                  }}
+                  style={{ borderTop: `1px solid ${UI.cardBorder}` }}
                 >
                   <div>
-                    <span
-                      className="small"
-                      style={{ color: UI.muted }}
-                    >
+                    <span className="small" style={{ color: UI.muted }}>
                       Final winner
                     </span>
                     <div className="fw-bold fs-5" style={{ color: UI.text }}>
@@ -1094,17 +1094,12 @@ function App() {
                   </div>
 
                   <div className="text-md-end">
-                    <span
-                      className="small"
-                      style={{ color: UI.muted }}
-                    >
+                    <span className="small" style={{ color: UI.muted }}>
                       Vote confidence
                     </span>
                     <div className="fw-bold fs-5" style={{ color: UI.cyan }}>
                       {result.poll.confidence ?? "N/A"}
-                      {result.poll.confidence != null
-                        ? "%"
-                        : ""}
+                      {result.poll.confidence != null ? "%" : ""}
                     </div>
                   </div>
                 </div>
@@ -1112,212 +1107,197 @@ function App() {
             )}
 
             {/* MODEL DETAILS */}
-            {Array.isArray(result.models) &&
-              result.models.length > 0 && (
-                <SectionCard
-                  icon="bi-cpu"
-                  title="Model Outputs"
-                  subtitle="Individual predictions used to calculate the ensemble result."
-                  className="mb-4"
-                >
-                  <div className="table-responsive">
-                    <table
-                      className="table table-dark align-middle mb-0"
-                      style={{
-                        "--bs-table-bg":
-                          "transparent",
-                        "--bs-table-border-color":
-                          "var(--border-color)",
-                        color: UI.text,
-                      }}
-                    >
-                      <thead>
-                        <tr>
-                          <th
-                            className="small"
-                            style={{ color: UI.muted }}
-                          >
-                            MODEL
-                          </th>
-                          <th
-                            className="small"
-                            style={{ color: UI.muted }}
-                          >
-                            VOTE
-                          </th>
-                          <th
-                            className="small"
-                            style={{ color: UI.muted }}
-                          >
-                            CONFIDENCE
-                          </th>
+            {Array.isArray(result.models) && result.models.length > 0 && (
+              <SectionCard
+                icon="bi-cpu"
+                title="Model Outputs"
+                subtitle="Individual predictions used to calculate the ensemble result."
+                className="mb-4"
+              >
+                <div className="table-responsive">
+                  <table
+                    className="table table-dark align-middle mb-0"
+                    style={{
+                      "--bs-table-bg": "transparent",
+                      "--bs-table-border-color": "var(--border-color)",
+                      color: UI.text,
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th className="small" style={{ color: UI.muted }}>MODEL</th>
+                        <th className="small" style={{ color: UI.muted }}>VOTE</th>
+                        <th className="small" style={{ color: UI.muted }}>CONFIDENCE</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {result.models.map((model, index) => (
+                        <tr key={model.model || `${index}`}>
+                          <td className="fw-medium" style={{ color: UI.text }}>
+                            {model.model}
+                          </td>
+                          <td>
+                            <ToneBadge tone={labelTone(model.label)}>
+                              {model.label}
+                            </ToneBadge>
+                          </td>
+                          <td style={{ color: UI.muted }}>
+                            {model.confidence != null ? `${model.confidence}%` : "N/A"}
+                          </td>
                         </tr>
-                      </thead>
-
-                      <tbody>
-                        {result.models.map(
-                          (model, index) => (
-                            <tr
-                              key={
-                                model.model ||
-                                `${index}`
-                              }
-                            >
-                              <td className="fw-medium" style={{ color: UI.text }}>
-                                {model.model}
-                              </td>
-
-                              <td>
-                                <ToneBadge
-                                  tone={labelTone(
-                                    model.label
-                                  )}
-                                >
-                                  {model.label}
-                                </ToneBadge>
-                              </td>
-
-                              <td
-                                style={{
-                                  color: UI.muted,
-                                }}
-                              >
-                                {model.confidence !=
-                                  null
-                                  ? `${model.confidence}%`
-                                  : "N/A"}
-                              </td>
-                            </tr>
-                          )
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </SectionCard>
-              )}
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </SectionCard>
+            )}
 
             {/* WEB VERIFICATION */}
+            {activeTab === "news" && result.webVerification && (
+              <SectionCard
+                icon="bi-globe2"
+                title="Web Verification"
+                subtitle="Gemini-assisted analysis and current web evidence."
+                className="mb-4"
+              >
+                <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
+                  {(() => {
+                    const wv = result.webVerification;
+                    const isOffline = wv.mode === "offline";
+                    const tone = !wv.available ? "neutral" : isOffline ? "warning" : "success";
+                    const badgeLabel = !wv.available
+                      ? "UNAVAILABLE"
+                      : isOffline
+                        ? "OFFLINE MODE"
+                        : "ACTIVE";
+                    const icon = !wv.available
+                      ? "bi-dash-circle"
+                      : isOffline
+                        ? "bi-wifi-off"
+                        : "bi-check-circle";
+                    return (
+                      <ToneBadge tone={tone}>
+                        <i className={`bi ${icon}`} />
+                        {badgeLabel}
+                      </ToneBadge>
+                    );
+                  })()}
+
+                  {result.webVerification.vote &&
+                    result.webVerification.vote !== "Unknown" && (
+                      <ToneBadge tone={labelTone(result.webVerification.vote)}>
+                        {result.webVerification.mode === "offline" ? "Offline check" : "Gemini"}:{" "}
+                        {result.webVerification.vote}
+                      </ToneBadge>
+                    )}
+                </div>
+
+                {result.webVerification.explanation && (
+                  <p
+                    className="mb-0"
+                    style={{
+                      color: UI.muted,
+                      lineHeight: 1.7,
+                      whiteSpace: "pre-wrap",
+                    }}
+                  >
+                    {result.webVerification.explanation}
+                  </p>
+                )}
+              </SectionCard>
+            )}
+
+            {activeTab === "news" && result?.pibFactCheck?.covered && (
+              <SectionCard
+                icon="bi-bank"
+                title="PIB Fact Check"
+                subtitle="Verdict from India's Press Information Bureau fact-check unit."
+                className="mb-4"
+              >
+                <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
+                  <ToneBadge tone={labelTone(result?.pibFactCheck?.vote)}>
+                    PIB: {result?.pibFactCheck?.vote}
+                  </ToneBadge>
+                </div>
+                {result?.pibFactCheck?.explanation && (
+                  <p className="mb-0" style={{ color: UI.muted, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                    {result.pibFactCheck.explanation}
+                  </p>
+                )}
+              </SectionCard>
+            )}
+
             {activeTab === "news" &&
-              result.webVerification && (
+              result?.urlTrust?.embedded?.checked?.length > 0 && (
                 <SectionCard
-                  icon="bi-globe2"
-                  title="Web Verification"
-                  subtitle="Gemini-assisted analysis and current web evidence."
+                  icon="bi-link-45deg"
+                  title="URL Trust Analysis"
+                  subtitle="Links found inside the article/headline, checked for phishing-style red flags."
                   className="mb-4"
                 >
-                  <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
-                    <ToneBadge
-                      tone={
-                        result.webVerification.available
-                          ? "success"
-                          : "neutral"
-                      }
+                  {result.urlTrust.embedded.checked.map((u, i) => (
+                    <div
+                      key={i}
+                      className="d-flex justify-content-between align-items-center gap-2 p-2 mb-2 rounded"
+                      style={{ background: "rgba(255,255,255,.03)" }}
                     >
-                      <i
-                        className={
-                          result.webVerification
-                            .available
-                            ? "bi bi-check-circle"
-                            : "bi bi-dash-circle"
-                        }
-                      />
-                      {result.webVerification
-                        .available
-                        ? "ACTIVE"
-                        : "UNAVAILABLE"}
-                    </ToneBadge>
-
-                    {result.webVerification.vote &&
-                      result.webVerification.vote !==
-                      "Unknown" && (
-                        <ToneBadge
-                          tone={labelTone(
-                            result.webVerification.vote
-                          )}
-                        >
-                          Gemini:{" "}
-                          {result.webVerification.vote}
-                        </ToneBadge>
-                      )}
-                  </div>
-
-                  {result.webVerification
-                    .explanation && (
-                      <p
-                        className="mb-0"
-                        style={{
-                          color: UI.muted,
-                          lineHeight: 1.7,
-                          whiteSpace: "pre-wrap",
-                        }}
-                      >
-                        {
-                          result.webVerification
-                            .explanation
-                        }
-                      </p>
-                    )}
+                      <span className="small text-truncate" style={{ maxWidth: "70%" }}>
+                        {u.url}
+                      </span>
+                      <ToneBadge tone={u.trusted ? "success" : "danger"}>
+                        {u.trusted ? "Trusted" : u.reasons?.join(", ") || "Untrusted"}
+                      </ToneBadge>
+                    </div>
+                  ))}
                 </SectionCard>
               )}
 
             {/* RELATED NEWS */}
-            {activeTab === "news" &&
-              relatedSources.length > 0 && (
-                <SectionCard
-                  icon="bi-newspaper"
-                  title="Related Sources"
-                  subtitle="External articles and evidence returned by the verification pipeline."
-                  className="mb-4"
-                >
-                  <div className="d-grid gap-2">
-                    {relatedSources.map(
-                      (source, index) => (
-                        <a
-                          key={
-                            source.url || index
-                          }
-                          href={source.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-decoration-none"
-                          style={{
-                            color: UI.text,
-                          }}
-                        >
-                          <div
-                            className="p-3 rounded-3 d-flex align-items-start gap-3"
-                            style={{
-                              background: "var(--bg-elevated)",
-                              border: `1px solid ${UI.cardBorder}`,
-                            }}
-                          >
-                            <span className="fw-bold" style={{ color: UI.cyan }}>
-                              {index + 1}
-                            </span>
+            {activeTab === "news" && relatedSources.length > 0 && (
+              <SectionCard
+                icon="bi-newspaper"
+                title="Related Sources"
+                subtitle="External articles and evidence returned by the verification pipeline."
+                className="mb-4"
+              >
+                <div className="d-grid gap-2">
+                  {relatedSources.map((source, index) => (
+                    <a
+                      key={source.url || index}
+                      href={source.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-decoration-none"
+                      style={{ color: UI.text }}
+                    >
+                      <div
+                        className="p-3 rounded-3 d-flex align-items-start gap-3"
+                        style={{
+                          background: "var(--bg-elevated)",
+                          border: `1px solid ${UI.cardBorder}`,
+                        }}
+                      >
+                        <span className="fw-bold" style={{ color: UI.cyan }}>
+                          {index + 1}
+                        </span>
 
-                            <div className="min-w-0">
-                              <div className="fw-semibold">
-                                {source.title ||
-                                  source.url}
-                              </div>
-                              <div
-                                className="small text-truncate mt-1"
-                                style={{
-                                  color: UI.subtle,
-                                }}
-                              >
-                                {source.url}
-                              </div>
-                            </div>
-
-                            <i className="bi bi-box-arrow-up-right ms-auto" style={{ color: UI.subtle }} />
+                        <div className="min-w-0">
+                          <div className="fw-semibold">
+                            {source.title || source.url}
                           </div>
-                        </a>
-                      )
-                    )}
-                  </div>
-                </SectionCard>
-              )}
+                          <div className="small text-truncate mt-1" style={{ color: UI.subtle }}>
+                            {source.url}
+                          </div>
+                        </div>
+
+                        <i className="bi bi-box-arrow-up-right ms-auto" style={{ color: UI.subtle }} />
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              </SectionCard>
+            )}
 
             {/* RESULT ACTIONS */}
             <div className="d-flex justify-content-end gap-2 mb-5">
@@ -1336,16 +1316,10 @@ function App() {
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(
-                      JSON.stringify(
-                        result,
-                        null,
-                        2
-                      )
+                      JSON.stringify(result, null, 2)
                     );
                   } catch {
-                    setError(
-                      "Unable to copy the result."
-                    );
+                    setError("Unable to copy the result.");
                   }
                 }}
               >
@@ -1370,12 +1344,8 @@ function App() {
               <div className="fw-semibold" style={{ color: UI.text }}>
                 TrustGuard Digital Forensics
               </div>
-              <div
-                className="small mt-1"
-                style={{ color: UI.subtle }}
-              >
-                ML-assisted verification with
-                optional Gemini web evidence.
+              <div className="small mt-1" style={{ color: UI.subtle }}>
+                ML-assisted verification with optional Gemini web evidence.
               </div>
             </div>
 
@@ -1396,8 +1366,7 @@ function App() {
               borderTop: `1px solid ${UI.cardBorder}`,
             }}
           >
-            © 2026 TrustGuard Digital Forensics.
-            Results are model-based risk assessments,
+            © 2026 TrustGuard Digital Forensics. Results are model-based risk assessments,
             not absolute proof.
           </div>
         </div>
@@ -1406,16 +1375,10 @@ function App() {
   );
 }
 
-function StatusCard({
-  icon,
-  title,
-  value,
-  detail,
-  action,
-}) {
+function StatusCard({ icon, title, value, detail, action }) {
   return (
     <div
-    className="h-100 p-3 glass-card status-card"
+      className="h-100 p-3 glass-card status-card"
       style={{
         background: UI.card,
         border: `1px solid ${UI.cardBorder}`,
@@ -1437,21 +1400,13 @@ function StatusCard({
         </div>
 
         <div className="flex-grow-1 min-w-0">
-          <div
-            className="small fw-semibold"
-            style={{ color: UI.muted }}
-          >
+          <div className="small fw-semibold" style={{ color: UI.muted }}>
             {title}
           </div>
-
           <div className="fw-semibold text-truncate mt-1" style={{ color: UI.text }}>
             {value}
           </div>
-
-          <div
-            className="small text-truncate mt-1"
-            style={{ color: UI.subtle }}
-          >
+          <div className="small text-truncate mt-1" style={{ color: UI.subtle }}>
             {detail}
           </div>
         </div>

@@ -182,3 +182,13 @@
     border-right-color: var(--border);
   }
 }
+
+.analysis-spin {
+  animation: analysis-spin 0.9s linear infinite;
+}
+
+@keyframes analysis-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

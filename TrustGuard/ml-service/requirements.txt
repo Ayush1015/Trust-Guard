@@ -14,6 +14,13 @@ sentencepiece>=0.2
 duckduckgo-search>=6.0
 spacy>=3.7
 python-dateutil>=2.8
+ddgs>=1.0
+deep-translator>=1.11.4
+scikit-learn
+pandas
+kagglehub
+torch
+beautifulsoup4
 
 # Install a matching torch/torchvision pair for BERTPhish.
 # Example: use the official PyTorch selector for your CPU/CUDA setup.

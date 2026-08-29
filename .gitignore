@@ -34,3 +34,33 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# ==========================================
+# Machine Learning Models / Large Artifacts
+# ==========================================
+
+TrustGuard/ml-service/pretrained_models/
+
+# Model binaries
+*.safetensors
+*.onnx
+*.onnx.data
+*.bin
+*.pt
+*.pth
+*.pkl
+*.joblib
+
+# Training artifacts
+optimizer.*
+scaler.pt
+random_states_*.pkl
+training_args.bin
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment / secrets
+.env
+.env.*
+!.env.example

@@ -46,7 +46,7 @@ import requests
 import kagglehub
 import numpy as np
 import pandas as pd
-
+import shutil
 from collections import Counter
 from urllib.parse import urlparse
 
@@ -883,61 +883,40 @@ def clean_cybersecurity_dataset(
 # DOWNLOAD PRETRAINED MODELS
 # ============================================================
 
-def download_pretrained_models():
+import shutil
 
-    print("\n")
-    print("=" * 70)
+def download_pretrained_models():
+    print("\n" + "=" * 70)
     print("DOWNLOADING PRETRAINED MODELS")
     print("=" * 70)
 
     paths = {}
 
-    for name, model_id in (
-        PRETRAINED_MODELS.items()
-    ):
-
-        print(
-            f"\nDownloading {name}..."
-        )
-
+    for name, model_id in PRETRAINED_MODELS.items():
+        print(f"\nDownloading {name}...")
         try:
+            cache_path = kagglehub.model_download(model_id)
 
-            path = kagglehub.model_download(
-                model_id
-            )
+            local_target = os.path.join(PRETRAINED_DIR, name)
+            if os.path.exists(local_target):
+                shutil.rmtree(local_target)
+            shutil.copytree(cache_path, local_target)
 
-            paths[name] = path
+            
+            paths[name] = name
 
-            print(
-                "✓",
-                path
-            )
+            print(f"✓ {name} → pretrained_models/{name}")
 
         except Exception as e:
-
-            print(
-                "✗ Failed:",
-                name
-            )
-
-            print(
-                e
-            )
+            print("✗ Failed:", name)
+            print(e)
 
     with open(
-        os.path.join(
-            PRETRAINED_DIR,
-            "model_paths.json"
-        ),
+        os.path.join(PRETRAINED_DIR, "model_paths.json"),
         "w",
         encoding="utf-8"
     ) as f:
-
-        json.dump(
-            paths,
-            f,
-            indent=4
-        )
+        json.dump(paths, f, indent=4)
 
     return paths
 
