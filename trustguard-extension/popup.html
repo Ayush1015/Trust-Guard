@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TrustGuard</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="tg-header">
+    <img src="icons/icon32.png" alt="" />
+    <div>
+      <h1>TrustGuard</h1>
+      <span class="tg-status"><span id="tg-dot" class="tg-dot checking"></span><span id="tg-status-text">Checking server…</span></span>
+    </div>
+    <div class="tg-header-actions">
+      <button id="tg-theme-btn" class="tg-icon-btn" title="Toggle theme">🌓</button>
+      <button id="tg-settings-btn" class="tg-icon-btn" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <nav class="tg-tabs" id="tg-tabs">
+    <button class="tg-tab active" data-tab="news">📰 News</button>
+    <button class="tg-tab" data-tab="review">⭐ Review</button>
+    <button class="tg-tab" data-tab="phishing">🔗 URL</button>
+    <button class="tg-tab" data-tab="history">🕘 History</button>
+    <button class="tg-tab" data-tab="account">👤 Account</button>
+  </nav>
+
+  <main class="tg-panel">
+
+    <!-- NEWS -->
+    <section class="tg-tab-panel" id="panel-news">
+      <label for="news-text">Paste headline or article text</label>
+      <textarea id="news-text" rows="5" placeholder="Paste a headline or article body…"></textarea>
+      <label class="tg-toggle" style="margin-top:8px;">
+        <input type="checkbox" id="news-stream-toggle" />
+        Stream results live
+      </label>
+      <button class="tg-btn" id="news-submit">Run Detection</button>
+    </section>
+
+    <!-- REVIEW -->
+    <section class="tg-tab-panel" id="panel-review" hidden>
+      <label for="review-text">Paste a review</label>
+      <textarea id="review-text" rows="5" placeholder="Paste a product or service review…"></textarea>
+      <div class="tg-btn-row">
+        <button class="tg-btn" id="review-submit">Analyze Review</button>
+        <button class="tg-btn tg-btn-outline" id="review-page-submit">Scan Reviews on This Page</button>
+      </div>
+      <div id="review-page-results"></div>
+    </section>
+
+    <!-- PHISHING -->
+    <section class="tg-tab-panel" id="panel-phishing" hidden>
+      <label for="url-input">URL to scan</label>
+      <input id="url-input" type="text" placeholder="https://example.com/login" />
+      <button class="tg-btn" id="url-submit">Scan URL</button>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="tg-tab-panel" id="panel-history" hidden>
+      <div id="last-result-block">
+        <label>Last scan on this device</label>
+        <div id="last-result-empty" class="tg-muted">
+          Right-click a link or selected text on any page and choose a TrustGuard option to see it here.
+        </div>
+        <div id="last-result" hidden></div>
+      </div>
+
+      <div id="account-history-block" style="margin-top:16px;" hidden>
+        <label>Account history</label>
+        <div id="history-list"></div>
+        <div id="history-detail" hidden></div>
+      </div>
+
+      <div id="history-signin-hint" class="tg-muted" style="margin-top:16px;">
+        Sign in from the Account tab to sync and view your full analysis history.
+      </div>
+    </section>
+
+    <!-- ACCOUNT -->
+    <section class="tg-tab-panel" id="panel-account" hidden>
+      <div id="account-signed-out">
+        <label for="auth-email">Email</label>
+        <input id="auth-email" type="email" placeholder="you@example.com" />
+        <label for="auth-password" style="margin-top:8px;">Password</label>
+        <input id="auth-password" type="password" placeholder="••••••••" />
+        <div class="tg-btn-row">
+          <button class="tg-btn" id="login-submit">Log In</button>
+          <button class="tg-btn tg-btn-outline" id="signup-submit">Sign Up</button>
+        </div>
+      </div>
+
+      <div id="account-signed-in" hidden>
+        <div class="tg-account-card">
+          <div class="tg-account-name" id="account-name">—</div>
+          <div class="tg-account-email" id="account-email">—</div>
+          <div id="account-quota-wrap" hidden>
+            <div class="tg-muted" id="account-quota-text" style="margin-top:8px;"></div>
+            <div class="tg-quota-bar"><div class="tg-quota-fill" id="account-quota-fill" style="width:0%"></div></div>
+          </div>
+        </div>
+        <button class="tg-btn tg-btn-outline" id="logout-btn">Log Out</button>
+      </div>
+    </section>
+
+    <div id="result" class="tg-result" hidden></div>
+    <div id="loading" class="tg-loading" hidden>Analyzing…</div>
+    <div id="error" class="tg-error" hidden></div>
+    <div id="success-msg" class="tg-success-msg" hidden></div>
+  </main>
+
+  <footer class="tg-footer">
+    <label class="tg-toggle">
+      <input type="checkbox" id="autoscan-toggle" />
+      Auto-scan links on pages
+    </label>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+.trustguard-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.trustguard-badge-danger { background: #b3261e; color: #fff; }
+.trustguard-badge-success { background: #157347; color: #fff; }
+.trustguard-badge-warning { background: #b8860b; color: #fffef8; }
+
+@media (prefers-color-scheme: dark) {
+  .trustguard-badge-danger { background: #ef6a63; color: #1a0d0a; }
+  .trustguard-badge-success { background: #4fd18b; color: #06210f; }
+  .trustguard-badge-warning { background: #d4af37; color: #1a1400; }
+}
+
+#trustguard-toast-root {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 320px;
+  pointer-events: none;
+}
+
+.trustguard-toast {
+  pointer-events: auto;
+  position: relative;
+  background: #fffdf8;
+  color: #201a08;
+  border: 1px solid rgba(180, 140, 20, 0.25);
+  border-left: 4px solid #b8860b;
+  border-radius: 10px;
+  padding: 10px 30px 10px 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  box-shadow: 0 10px 30px rgba(120, 95, 20, 0.2);
+  opacity: 0;
+  transform: translateX(16px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  .trustguard-toast {
+    background: #1a1509;
+    color: #f5eeda;
+    border-color: rgba(212, 175, 55, 0.3);
+    border-left-color: #d4af37;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  }
+  .trustguard-toast-body { color: #c9bb8e !important; }
+  .trustguard-toast-close { color: #c9bb8e !important; }
+}
+
+.trustguard-toast-visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.trustguard-toast-danger { border-left-color: #b3261e; }
+.trustguard-toast-success { border-left-color: #157347; }
+.trustguard-toast-warning { border-left-color: #b8860b; }
+
+@media (prefers-color-scheme: dark) {
+  .trustguard-toast-danger { border-left-color: #ef6a63; }
+  .trustguard-toast-success { border-left-color: #4fd18b; }
+  .trustguard-toast-warning { border-left-color: #f0c419; }
+}
+
+.trustguard-toast-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.trustguard-toast-body {
+  color: #6b5d3f;
+  line-height: 1.4;
+}
+
+.trustguard-toast-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #6b5d3f;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.trustguard-toast-close:hover {
+  color: #b8860b;
+}

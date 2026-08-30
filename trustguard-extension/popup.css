@@ -1,0 +1,446 @@
+/* ============================================================
+   TrustGuard — Gold Theme
+   Light: white + gold accent.  Dark: near-black + same gold accent.
+   ============================================================ */
+
+:root,
+:root[data-theme="light"] {
+  --tg-bg: #ffffff;
+  --tg-bg-soft: #fbf8f1;
+  --tg-card: #ffffff;
+  --tg-card-soft: #faf5e8;
+  --tg-border: rgba(180, 140, 20, 0.22);
+  --tg-border-soft: rgba(180, 140, 20, 0.12);
+
+  --tg-text: #201a08;
+  --tg-text-soft: #6b5d3f;
+  --tg-text-faint: #9a8c66;
+
+  --tg-gold: #b8860b;
+  --tg-gold-strong: #8a6508;
+  --tg-gold-soft: rgba(184, 134, 11, 0.12);
+  --tg-gold-gradient: linear-gradient(135deg, #d4af37 0%, #b8860b 100%);
+
+  --tg-success: #157347;
+  --tg-success-soft: rgba(21, 115, 71, 0.1);
+  --tg-danger: #b3261e;
+  --tg-danger-soft: rgba(179, 38, 30, 0.1);
+  --tg-warning: #9a6b00;
+  --tg-warning-soft: rgba(154, 107, 0, 0.12);
+
+  --tg-shadow: 0 10px 28px rgba(120, 95, 20, 0.12);
+}
+
+:root[data-theme="dark"] {
+  --tg-bg: #0e0c07;
+  --tg-bg-soft: #161207;
+  --tg-card: #1a1509;
+  --tg-card-soft: #201a0c;
+  --tg-border: rgba(212, 175, 55, 0.28);
+  --tg-border-soft: rgba(212, 175, 55, 0.14);
+
+  --tg-text: #f5eeda;
+  --tg-text-soft: #c9bb8e;
+  --tg-text-faint: #9a8c66;
+
+  --tg-gold: #d4af37;
+  --tg-gold-strong: #f0c419;
+  --tg-gold-soft: rgba(212, 175, 55, 0.16);
+  --tg-gold-gradient: linear-gradient(135deg, #f0c419 0%, #d4af37 100%);
+
+  --tg-success: #4fd18b;
+  --tg-success-soft: rgba(79, 209, 139, 0.14);
+  --tg-danger: #ef6a63;
+  --tg-danger-soft: rgba(239, 106, 99, 0.14);
+  --tg-warning: #f0c419;
+  --tg-warning-soft: rgba(240, 196, 25, 0.14);
+
+  --tg-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+/* Fall back to the system preference until JS applies a saved choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --tg-bg: #0e0c07;
+    --tg-bg-soft: #161207;
+    --tg-card: #1a1509;
+    --tg-card-soft: #201a0c;
+    --tg-border: rgba(212, 175, 55, 0.28);
+    --tg-border-soft: rgba(212, 175, 55, 0.14);
+    --tg-text: #f5eeda;
+    --tg-text-soft: #c9bb8e;
+    --tg-text-faint: #9a8c66;
+    --tg-gold: #d4af37;
+    --tg-gold-strong: #f0c419;
+    --tg-gold-soft: rgba(212, 175, 55, 0.16);
+    --tg-gold-gradient: linear-gradient(135deg, #f0c419 0%, #d4af37 100%);
+    --tg-success: #4fd18b;
+    --tg-success-soft: rgba(79, 209, 139, 0.14);
+    --tg-danger: #ef6a63;
+    --tg-danger-soft: rgba(239, 106, 99, 0.14);
+    --tg-warning: #f0c419;
+    --tg-warning-soft: rgba(240, 196, 25, 0.14);
+    --tg-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 380px;
+  max-height: 600px;
+  overflow-y: auto;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  font-size: 13px;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+body::-webkit-scrollbar { width: 6px; }
+body::-webkit-scrollbar-thumb { background: var(--tg-border); border-radius: 4px; }
+
+/* ---------------- HEADER ---------------- */
+
+.tg-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--tg-bg-soft);
+  border-bottom: 1px solid var(--tg-border);
+}
+
+.tg-header img {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.tg-header h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  background: var(--tg-gold-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.tg-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--tg-text-soft);
+}
+
+.tg-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tg-text-faint);
+  box-shadow: 0 0 6px currentColor;
+}
+.tg-dot.online { background: var(--tg-success); color: var(--tg-success); }
+.tg-dot.offline { background: var(--tg-danger); color: var(--tg-danger); }
+.tg-dot.checking { background: var(--tg-warning); color: var(--tg-warning); }
+
+.tg-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.tg-icon-btn {
+  background: var(--tg-card-soft);
+  border: 1px solid var(--tg-border);
+  color: var(--tg-gold);
+  border-radius: 9px;
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.tg-icon-btn:hover {
+  background: var(--tg-gold-soft);
+  transform: translateY(-1px);
+}
+
+/* ---------------- TABS ---------------- */
+
+.tg-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 0;
+  flex-wrap: wrap;
+}
+
+.tg-tab {
+  flex: 1 1 auto;
+  min-width: 62px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--tg-text-soft);
+  padding: 8px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tg-tab:hover {
+  background: var(--tg-gold-soft);
+  color: var(--tg-text);
+}
+
+.tg-tab.active {
+  background: var(--tg-gold-gradient);
+  color: #1a1400;
+  box-shadow: 0 4px 14px rgba(184, 134, 11, 0.35);
+}
+
+/* ---------------- PANEL / FORM ELEMENTS ---------------- */
+
+.tg-panel { padding: 14px 16px; }
+
+.tg-tab-panel label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--tg-text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tg-tab-panel textarea,
+.tg-tab-panel input[type="text"],
+.tg-tab-panel input[type="email"],
+.tg-tab-panel input[type="password"] {
+  width: 100%;
+  background: var(--tg-card-soft);
+  border: 1px solid var(--tg-border);
+  color: var(--tg-text);
+  border-radius: 10px;
+  padding: 9px 11px;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.tg-tab-panel textarea:focus,
+.tg-tab-panel input:focus {
+  outline: none;
+  border-color: var(--tg-gold);
+  box-shadow: 0 0 0 3px var(--tg-gold-soft);
+}
+
+.tg-btn {
+  margin-top: 10px;
+  width: 100%;
+  background: var(--tg-gold-gradient);
+  color: #1a1400;
+  border: none;
+  border-radius: 10px;
+  padding: 10px;
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(184, 134, 11, 0.3);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tg-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(184, 134, 11, 0.4);
+}
+
+.tg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.tg-btn-outline {
+  background: transparent;
+  color: var(--tg-gold);
+  border: 1px solid var(--tg-gold);
+  box-shadow: none;
+}
+
+.tg-btn-outline:hover:not(:disabled) {
+  background: var(--tg-gold-soft);
+}
+
+.tg-btn-row {
+  display: flex;
+  gap: 8px;
+}
+.tg-btn-row .tg-btn { margin-top: 10px; }
+
+.tg-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ---------------- RESULT / STATE BLOCKS ---------------- */
+
+.tg-result {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--tg-card-soft);
+  border: 1px solid var(--tg-border-soft);
+}
+
+.tg-result-label {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 11px;
+  margin-bottom: 8px;
+  letter-spacing: 0.02em;
+}
+
+.tone-success { background: var(--tg-success-soft); color: var(--tg-success); }
+.tone-danger { background: var(--tg-danger-soft); color: var(--tg-danger); }
+.tone-warning { background: var(--tg-warning-soft); color: var(--tg-warning); }
+.tone-gold { background: var(--tg-gold-soft); color: var(--tg-gold-strong); }
+
+.tg-result-explanation {
+  color: var(--tg-text-soft);
+  line-height: 1.55;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.tg-loading, .tg-error, .tg-muted, .tg-success-msg {
+  margin-top: 10px;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.tg-loading { color: var(--tg-gold-strong); background: var(--tg-gold-soft); }
+.tg-error { color: var(--tg-danger); background: var(--tg-danger-soft); }
+.tg-success-msg { color: var(--tg-success); background: var(--tg-success-soft); }
+.tg-muted { color: var(--tg-text-faint); padding: 0; }
+
+/* ---------------- REVIEW BULK LIST ---------------- */
+
+.tg-review-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--tg-border-soft);
+  margin-top: 6px;
+  background: var(--tg-card);
+}
+
+.tg-review-item .tg-result-explanation { font-size: 11px; margin-top: 4px; }
+
+/* ---------------- HISTORY LIST ---------------- */
+
+.tg-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--tg-border-soft);
+  margin-top: 6px;
+  background: var(--tg-card);
+  cursor: pointer;
+}
+
+.tg-history-item:hover { border-color: var(--tg-gold); }
+
+.tg-history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tg-history-type {
+  font-size: 10px;
+  color: var(--tg-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tg-history-snippet {
+  font-size: 12px;
+  color: var(--tg-text);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- ACCOUNT / AUTH ---------------- */
+
+.tg-account-card {
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--tg-card-soft);
+  border: 1px solid var(--tg-border-soft);
+  margin-bottom: 12px;
+}
+
+.tg-account-name { font-weight: 700; font-size: 13px; }
+.tg-account-email { font-size: 11px; color: var(--tg-text-soft); }
+
+.tg-quota-bar {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--tg-border-soft);
+  overflow: hidden;
+}
+.tg-quota-fill {
+  height: 100%;
+  background: var(--tg-gold-gradient);
+}
+
+.tg-link-btn {
+  background: none;
+  border: none;
+  color: var(--tg-gold);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+/* ---------------- FOOTER ---------------- */
+
+.tg-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--tg-border);
+  background: var(--tg-bg-soft);
+}
+
+.tg-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--tg-text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tg-toggle input { accent-color: var(--tg-gold); }

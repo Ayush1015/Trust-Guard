@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TrustGuard Settings</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --card: #faf5e8;
+      --border: rgba(180, 140, 20, 0.22);
+      --text: #201a08;
+      --text-soft: #6b5d3f;
+      --gold: #b8860b;
+      --gold-gradient: linear-gradient(135deg, #d4af37 0%, #b8860b 100%);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e0c07;
+        --card: #1a1509;
+        --border: rgba(212, 175, 55, 0.3);
+        --text: #f5eeda;
+        --text-soft: #c9bb8e;
+        --gold: #d4af37;
+        --gold-gradient: linear-gradient(135deg, #f0c419 0%, #d4af37 100%);
+      }
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 22px;
+      width: 380px;
+    }
+    h1 {
+      font-size: 16px;
+      margin-top: 0;
+      font-weight: 800;
+      background: var(--gold-gradient);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    label { display: block; margin: 14px 0 6px; color: var(--text-soft); font-size: 12px; font-weight: 600; }
+    input[type="text"] {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    input[type="text"]:focus { outline: none; border-color: var(--gold); }
+    button {
+      margin-top: 16px;
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 10px;
+      background: var(--gold-gradient);
+      color: #1a1400;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(184, 134, 11, 0.3);
+    }
+    .hint { color: var(--text-soft); opacity: 0.8; font-size: 11px; margin-top: 6px; }
+    #saved { color: #157347; font-size: 12px; margin-top: 10px; display: none; }
+    @media (prefers-color-scheme: dark) { #saved { color: #4fd18b; } }
+  </style>
+</head>
+<body>
+  <h1>TrustGuard Settings</h1>
+
+  <label for="api-url">TrustGuard API base URL (Node gateway)</label>
+  <input id="api-url" type="text" placeholder="http://localhost:5000/api/v1" />
+  <div class="hint">
+    This must match the address of your running TrustGuard Node.js gateway.
+    Default: http://localhost:5000/api/v1
+  </div>
+
+  <button id="save">Save</button>
+  <div id="saved">Saved.</div>
+
+  <script src="options.js"></script>
+</body>
+</html>
