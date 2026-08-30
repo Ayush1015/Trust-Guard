@@ -64,12 +64,8 @@ function normalizePayload(tab, payload = {}) {
   }
 
   if (tab === "review") {
-    return {
-      ...payload,
-      text: clean(payload.text),
-      product_url: clean(payload.product_url),
-    };
-  }
+  return { ...payload, text: clean(payload.text), product_url: clean(payload.product_url) };
+}
 
   if (tab === "phishing") {
     return { ...payload, url: clean(payload.url) };
@@ -479,11 +475,6 @@ function App() {
       setError("");
       setLastPayload(normalized);
 
-      // Live mode (news only) hands the request off entirely to
-      // LiveAnalysisProgress, which owns its own SSE connection and
-      // reports back via onComplete/onError. Nothing else to do here —
-      // and critically, we must NOT also fire the blocking request below,
-      // or two competing analyses would race for the same result.
       if (activeTab === "news" && liveMode) {
         return;
       }
@@ -939,70 +930,145 @@ function App() {
         </SectionCard>
 
         {/* LOADING */}
-        {loading && (
-          <SectionCard className="mb-4">
-            <div
-              className="d-flex align-items-center gap-3"
-              role="status"
-              aria-live="polite"
-              aria-busy="true"
-            >
-              <div className="scan-orbit" role="status">
-                <span className="visually-hidden">Loading...</span>
-              </div>
+{loading && (
+  <SectionCard className="mb-4">
+    <style>{`
+      .scan-orbit {
+        position: relative;
+        width: 52px;
+        height: 52px;
+        flex-shrink: 0;
+      }
+      .scan-orbit::before,
+      .scan-orbit::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(212, 175, 106, 0.35);
+      }
+      .scan-orbit::after {
+        inset: 8px;
+        border-color: rgba(238, 218, 34, 0.25);
+      }
+      .scan-orbit-sweep {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: conic-gradient(
+          from 0deg,
+          transparent 0deg,
+          transparent 260deg,
+          rgba(212, 175, 106, 0.9) 300deg,
+          rgba(238, 139, 34, 0.9) 360deg
+        );
+        animation: scanSpin 1.4s linear infinite;
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+        mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      }
+      .scan-orbit-core {
+        position: absolute;
+        inset: 18px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(238, 177, 34, 0.35), transparent 70%);
+        animation: scanPulse 1.8s ease-in-out infinite;
+      }
+      @keyframes scanSpin { to { transform: rotate(360deg); } }
+      @keyframes scanPulse {
+        0%, 100% { opacity: 0.4; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1); }
+      }
+      .rc-loading-rail {
+        height: 3px;
+        border-radius: 20px;
+        background: rgba(255,255,255,0.06);
+        overflow: hidden;
+      }
+      .rc-loading-rail-fill {
+        height: 100%;
+        width: 40%;
+        border-radius: 20px;
+        background: linear-gradient(90deg, transparent, #d4af6a, #eecf22, transparent);
+        animation: railSweep 1.6s ease-in-out infinite;
+      }
+      @keyframes railSweep {
+        0% { transform: translateX(-120%); }
+        100% { transform: translateX(280%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .scan-orbit-sweep, .scan-orbit-core, .rc-loading-rail-fill { animation: none !important; }
+      }
+    `}</style>
 
-              <div className="flex-grow-1">
-                <div className="fw-semibold" style={{ color: UI.text }}>
-                  Running TrustGuard analysis
-                </div>
-                <div className="small mt-1" style={{ color: UI.muted }}>
-                  {activeTab === "news" && liveMode ? (
-                    <LiveAnalysisProgress
-                      streamUrl={`${API_BASE_URL}/analyze/news/stream`}
-                      payload={lastPayload}
-                      geminiApiKey={geminiApiKey}
-                      onComplete={(finalResult) => {
-                        setResult(finalResult);
-                        setLoading(false);
-                      }}
-                      onError={(message) => {
-                        setError(message);
-                        setLoading(false);
-                      }}
-                    />
-                  ) : activeTab === "news" ? (
-                    "Polling compatible news models and optional web evidence..."
-                  ) : activeTab === "review" ? (
-                    "Polling compatible review models..."
-                  ) : (
-                    "Analyzing URL features and phishing models..."
-                  )}
-                </div>
-              </div>
+    <div
+      className="d-flex align-items-center gap-3"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="scan-orbit" role="status">
+        <div className="scan-orbit-sweep" />
+        <div className="scan-orbit-core" />
+        <span className="visually-hidden">Loading...</span>
+      </div>
 
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-danger"
-                onClick={cancel}
-              >
-                Cancel
-              </button>
-            </div>
+      <div className="flex-grow-1">
+        <div className="d-flex align-items-center gap-2">
+          <div className="fw-semibold" style={{ color: UI.text }}>
+            Certifying this {activeTab === "news" ? "article" : activeTab === "review" ? "review" : "URL"}
+          </div>
+          <span
+            className="small px-2 py-1 rounded-pill"
+            style={{
+              color: "#d4af6a",
+              background: "rgba(212,175,106,0.10)",
+              border: "1px solid rgba(212,175,106,0.3)",
+              letterSpacing: "0.05em",
+            }}
+          >
+            LIVE
+          </span>
+        </div>
 
-            <div
-              className="progress mt-3"
-              style={{
-                height: 4,
-                background: "var(--bg-elevated)",
+        <div className="small mt-1" style={{ color: UI.muted }}>
+          {activeTab === "news" && liveMode ? (
+            <LiveAnalysisProgress
+              streamUrl={`${API_BASE_URL}/analyze/news/stream`}
+              payload={lastPayload}
+              geminiApiKey={geminiApiKey}
+              onComplete={(finalResult) => {
+                setResult(finalResult);
+                setLoading(false);
               }}
-            >
-              <div
-                className="progress-bar progress-bar-striped progress-bar-animated bg-info"
-                style={{ width: "100%" }}
-              />
-            </div>
-          </SectionCard>
-        )}
+              onError={(message) => {
+                setError(message);
+                setLoading(false);
+              }}
+            />
+          ) : activeTab === "news" ? (
+            "Polling compatible news models and optional web evidence..."
+          ) : activeTab === "review" ? (
+            "Polling compatible review models..."
+          ) : (
+            "Analyzing URL features and phishing models..."
+          )}
+        </div>
+
+        <div className="rc-loading-rail mt-3">
+          <div className="rc-loading-rail-fill" />
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="btn btn-sm btn-outline-danger flex-shrink-0"
+        onClick={cancel}
+      >
+        Cancel
+      </button>
+    </div>
+  </SectionCard>
+)}
 
         {/* ERROR */}
         {error && !loading && (
@@ -1106,7 +1172,7 @@ function App() {
               </SectionCard>
             )}
 
-            {/* MODEL DETAILS */}
+            {/* MODEL DETAILS
             {Array.isArray(result.models) && result.models.length > 0 && (
               <SectionCard
                 icon="bi-cpu"
@@ -1151,7 +1217,7 @@ function App() {
                   </table>
                 </div>
               </SectionCard>
-            )}
+            )} */}
 
             {/* WEB VERIFICATION */}
             {activeTab === "news" && result.webVerification && (

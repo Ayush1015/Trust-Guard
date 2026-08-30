@@ -4,6 +4,7 @@ const STEP_ORDER = [
   {
     key: 'claim',
     label: 'Understanding claim',
+    icon: 'bi-lightbulb',
     events: [
       'claim_extraction_started',
       'claim_extracted',
@@ -14,6 +15,7 @@ const STEP_ORDER = [
   {
     key: 'poll',
     label: 'Polling ML models',
+    icon: 'bi-cpu',
     events: [
       'model_started',
       'model_completed',
@@ -25,12 +27,14 @@ const STEP_ORDER = [
   {
     key: 'temporal',
     label: 'Checking currentness',
+    icon: 'bi-clock-history',
     events: ['temporal_classified'],
     doneEvents: ['temporal_classified'],
   },
   {
     key: 'search',
     label: 'Searching for related coverage',
+    icon: 'bi-search',
     events: [
       'search_started',
       'search_completed',
@@ -42,6 +46,7 @@ const STEP_ORDER = [
   {
     key: 'articles',
     label: 'Analyzing related articles',
+    icon: 'bi-newspaper',
     events: [
       'article_found',
       'article_extracted',
@@ -53,6 +58,7 @@ const STEP_ORDER = [
   {
     key: 'cluster',
     label: 'Building source clusters',
+    icon: 'bi-diagram-3',
     events: [
       'source_clustering_started',
       'source_cluster_created',
@@ -62,6 +68,7 @@ const STEP_ORDER = [
   {
     key: 'synthesis',
     label: 'Generating final assessment',
+    icon: 'bi-stars',
     events: [
       'cross_evidence_started',
       'cross_evidence_completed',
@@ -81,6 +88,22 @@ const DONE_EVENTS = new Set(
 );
 
 const MAX_LOG_LINES = 50;
+
+const UI = {
+  cyan: 'var(--accent-cyan)',
+  cyanSoft: 'var(--accent-cyan-soft)',
+  cyanBorder: 'var(--accent-cyan-border)',
+  text: 'var(--text-primary)',
+  muted: 'var(--text-secondary)',
+  subtle: 'var(--text-muted)',
+  card: 'var(--bg-card)',
+  cardBorder: 'var(--border-color)',
+  tileBg: 'var(--tile-bg)',
+  tileBorder: 'var(--tile-border)',
+  success: 'var(--success)',
+  danger: 'var(--danger)',
+  warning: 'var(--warning)',
+};
 
 function createInitialStepStatus() {
   return Object.fromEntries(
@@ -212,55 +235,75 @@ function getModelStatus(type) {
   }
 }
 
+function formatElapsed(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function toneColor(tone) {
+  return { success: UI.success, danger: UI.danger, warning: UI.warning }[tone] || UI.cyan;
+}
+
+// ---------------------------------------------------------------------------
+
 function ModelResult({ model }) {
   const isUnavailable = model.status === 'unavailable';
   const isRunning = model.status === 'running';
 
   let value = model.label || 'UNKNOWN';
-  let color = 'var(--text-muted)';
+  let color = UI.subtle;
+  let dotTone = 'muted';
 
   if (isRunning) {
     value = 'analyzing…';
-    color = 'var(--accent-cyan)';
+    color = UI.cyan;
   } else if (isUnavailable) {
     value = 'NO VOTE';
   } else if (model.label === 'Fake') {
-    color = 'var(--danger)';
+    color = UI.danger;
+    dotTone = 'danger';
   } else if (model.label === 'Real') {
-    color = 'var(--success)';
+    color = UI.success;
+    dotTone = 'success';
   } else {
-    color = 'var(--warning)';
+    color = UI.warning;
+    dotTone = 'warning';
   }
 
   return (
-    <div className="d-flex justify-content-between align-items-center gap-3 small">
-      <span
-        className="text-truncate"
-        style={{
-          color: 'var(--text-secondary)',
-          minWidth: 0,
-        }}
-        title={model.model}
-      >
-        {model.model}
-        {model.articleId ? (
-          <span style={{ color: 'var(--text-muted)' }}>
-            {' '}· related article
+    <div
+      className="d-flex justify-content-between align-items-center gap-3 small px-2 py-2 rounded"
+      style={{ background: UI.tileBg, border: `1px solid ${UI.tileBorder}` }}
+    >
+      <span className="d-flex align-items-center gap-2 text-truncate" style={{ minWidth: 0 }}>
+        {isRunning ? (
+          <span className="analysis-spin" style={{ color: UI.cyan, fontSize: '0.7rem' }}>
+            <i className="bi bi-arrow-repeat" />
           </span>
-        ) : null}
+        ) : (
+          <span
+            className="rounded-circle flex-shrink-0"
+            style={{
+              width: 7,
+              height: 7,
+              background: dotTone === 'muted' ? UI.subtle : toneColor(dotTone),
+            }}
+          />
+        )}
+        <span className="text-truncate" style={{ color: UI.muted }} title={model.model}>
+          {model.model}
+          {model.articleId ? (
+            <span style={{ color: UI.subtle }}> · related article</span>
+          ) : null}
+        </span>
       </span>
 
-      <span
-        className="fw-semibold flex-shrink-0"
-        style={{ color }}
-      >
+      <span className="fw-semibold flex-shrink-0" style={{ color }}>
         {value}
-
         {model.confidence != null && !isUnavailable && !isRunning && (
-          <span
-            className="ms-1 fw-normal"
-            style={{ color: 'var(--text-muted)' }}
-          >
+          <span className="ms-1 fw-normal" style={{ color: UI.subtle }}>
             {Number(model.confidence).toFixed(0)}%
           </span>
         )}
@@ -268,6 +311,32 @@ function ModelResult({ model }) {
     </div>
   );
 }
+
+const ARTICLE_STATUS_ICON = {
+  found: 'bi-search',
+  extracted: 'bi-file-earmark-text',
+  analyzed: 'bi-check-circle-fill',
+};
+
+function ArticleRow({ article }) {
+  const status = article.status || 'found';
+  const tone = status === 'analyzed' ? UI.success : status === 'extracted' ? UI.cyan : UI.subtle;
+  const title = article.title || article.headline || article.url || 'Untitled source';
+
+  return (
+    <div className="lap-article-row d-flex align-items-center gap-2 px-2 py-1">
+      <i className={`bi ${ARTICLE_STATUS_ICON[status] || 'bi-circle'}`} style={{ color: tone, fontSize: '0.8rem' }} />
+      <span className="small text-truncate" style={{ color: UI.muted, minWidth: 0 }} title={title}>
+        {title}
+      </span>
+      <span className="small ms-auto flex-shrink-0" style={{ color: UI.subtle, textTransform: 'capitalize' }}>
+        {status}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 export default function LiveAnalysisProgress({
   streamUrl,
@@ -282,9 +351,13 @@ export default function LiveAnalysisProgress({
   const [articles, setArticles] = useState([]);
   const [streamStatus, setStreamStatus] = useState('connecting');
   const [analysisId, setAnalysisId] = useState(null);
+  const [eventLog, setEventLog] = useState([]);
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const abortRef = useRef(null);
   const completedRef = useRef(false);
+  const startRef = useRef(null);
+  const clockRef = useRef(null);
 
   /*
    * Keep callback changes from restarting the HTTP stream.
@@ -332,11 +405,39 @@ export default function LiveAnalysisProgress({
     setArticles([]);
     setAnalysisId(null);
     setStreamStatus('connecting');
+    setEventLog([]);
+    setElapsedMs(0);
+
+    startRef.current = Date.now();
+    clockRef.current = window.setInterval(() => {
+      setElapsedMs(Date.now() - startRef.current);
+    }, 250);
+
+    const stopClock = () => {
+      if (clockRef.current) {
+        window.clearInterval(clockRef.current);
+        clockRef.current = null;
+      }
+    };
+
+    const pushLog = (type) => {
+      const time = new Date().toLocaleTimeString([], {
+        hour12: false,
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      setEventLog((prev) => {
+        const next = [...prev, { time, type }];
+        return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
+      });
+    };
 
     const reportError = (message) => {
       if (controller.signal.aborted) return;
 
       setStreamStatus('error');
+      stopClock();
 
       onErrorRef.current?.(
         message || 'Live analysis failed.',
@@ -404,6 +505,8 @@ export default function LiveAnalysisProgress({
           if (import.meta.env?.DEV) {
             console.debug('[LiveAnalysis]', type, data);
           }
+
+          pushLog(type);
 
           if (type === 'analysis_started') {
             setAnalysisId(data.analysisId || null);
@@ -571,6 +674,7 @@ export default function LiveAnalysisProgress({
             if (!completedRef.current) {
               completedRef.current = true;
               setStreamStatus('completed');
+              stopClock();
 
               setStepStatus((prev) => ({
                 ...prev,
@@ -596,6 +700,7 @@ export default function LiveAnalysisProgress({
               );
             } else if (data.status === 'COMPLETED') {
               setStreamStatus('completed');
+              stopClock();
             }
 
             /*
@@ -639,6 +744,7 @@ export default function LiveAnalysisProgress({
 
     return () => {
       controller.abort();
+      stopClock();
 
       if (abortRef.current === controller) {
         abortRef.current = null;
@@ -668,229 +774,215 @@ export default function LiveAnalysisProgress({
     [articles],
   );
 
-  const statusLabel = {
-    connecting: 'Connecting…',
-    running: 'Analysis in progress',
-    completed: 'Analysis complete',
-    error: 'Analysis failed',
+  const stepProgress = useMemo(() => {
+    const total = STEP_ORDER.length;
+    const done = STEP_ORDER.filter((step) => {
+      const status = stepStatus[step.key];
+      return status === 'done' || status === 'skipped';
+    }).length;
+    const active = STEP_ORDER.some((step) => stepStatus[step.key] === 'active') ? 0.5 : 0;
+    return Math.min(100, ((done + active) / total) * 100);
+  }, [stepStatus]);
+
+  const statusMeta = {
+    connecting: { label: 'Connecting…', icon: 'bi-broadcast', color: UI.cyan },
+    running: { label: 'Analysis in progress', icon: 'bi-activity', color: UI.cyan },
+    completed: { label: 'Analysis complete', icon: 'bi-check-circle-fill', color: UI.success },
+    error: { label: 'Analysis failed', icon: 'bi-exclamation-circle-fill', color: UI.danger },
   }[streamStatus];
 
   return (
-    <div className="d-flex flex-column gap-3">
+    <div
+      className="p-4 position-relative"
+      style={{
+        background: UI.card,
+        border: `1px solid ${UI.cardBorder}`,
+        borderRadius: 18,
+        boxShadow: '0 18px 55px rgba(0,0,0,.16)',
+        overflow: 'hidden',
+      }}
+    >
+      {(streamStatus === 'running' || streamStatus === 'connecting') && (
+        <span className="lap-border-glow" aria-hidden="true" />
+      )}
+
       {/* Header */}
-      <div className="d-flex align-items-center justify-content-between gap-3">
-        <div className="d-flex align-items-center gap-2">
-          {streamStatus === 'running' ||
-          streamStatus === 'connecting' ? (
-            <span
-              className="spinner-border spinner-border-sm"
-              role="status"
-              aria-hidden="true"
-              style={{ color: 'var(--accent-cyan)' }}
-            />
-          ) : (
-            <i
-              className={`bi ${
-                streamStatus === 'completed'
-                  ? 'bi-check-circle-fill'
-                  : 'bi-exclamation-circle-fill'
-              }`}
-              style={{
-                color:
-                  streamStatus === 'completed'
-                    ? 'var(--success)'
-                    : 'var(--danger)',
-              }}
-            />
-          )}
-
-          <span
-            className="small fw-semibold"
-            style={{ color: 'var(--text-primary)' }}
-          >
-            {statusLabel}
-          </span>
-        </div>
-
-        {analysisId && (
-          <span
-            className="small text-truncate"
-            title={analysisId}
-            style={{
-              color: 'var(--text-muted)',
-              maxWidth: 160,
-            }}
-          >
-            {analysisId}
-          </span>
-        )}
-      </div>
-
-      {/* Pipeline */}
-      <div className="d-flex flex-column gap-2">
-        {STEP_ORDER.map((step) => {
-          const status =
-            stepStatus[step.key] || 'pending';
-
-          const isDone = status === 'done';
-          const isActive = status === 'active';
-          const isSkipped = status === 'skipped';
-
-          const icon = isDone
-            ? 'bi-check-circle-fill'
-            : isActive
-              ? 'bi-arrow-repeat'
-              : isSkipped
-                ? 'bi-dash-circle'
-                : 'bi-circle';
-
-          const color = isDone
-            ? 'var(--success)'
-            : isActive
-              ? 'var(--accent-cyan)'
-              : 'var(--text-muted)';
-
-          return (
-            <div
-              key={step.key}
-              className="d-flex align-items-center gap-2"
-            >
-              <i
-                className={`bi ${icon} ${
-                  isActive ? 'analysis-spin' : ''
-                }`}
-                style={{
-                  color,
-                  fontSize: '0.95rem',
-                }}
-              />
-
-              <span
-                className="small"
-                style={{
-                  color:
-                    status === 'pending' || isSkipped
-                      ? 'var(--text-muted)'
-                      : 'var(--text-primary)',
-                }}
-              >
-                {step.label}
-
-                {isSkipped && (
-                  <span className="ms-1">
-                    · skipped
-                  </span>
-                )}
+      <div className="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-4 position-relative">
+        <div className="d-flex align-items-center gap-3">
+          <div className="lap-orb">
+            <span className="lap-orb-core" />
+            {(streamStatus === 'running' || streamStatus === 'connecting') && (
+              <span className="lap-orb-ring" />
+            )}
+          </div>
+          <div>
+            <div className="d-flex align-items-center gap-2">
+              <i className={`bi ${statusMeta.icon}`} style={{ color: statusMeta.color }} />
+              <span className="fw-semibold" style={{ color: UI.text, fontSize: '1.02rem' }}>
+                {statusMeta.label}
               </span>
             </div>
-          );
-        })}
+            {analysisId && (
+              <div className="small text-truncate" style={{ color: UI.subtle, maxWidth: 260 }} title={analysisId}>
+                ID: {analysisId}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="text-end">
+          <div className="lap-timer" style={{ color: UI.cyan }}>
+            {formatElapsed(elapsedMs)}
+          </div>
+          <div className="small" style={{ color: UI.subtle }}>elapsed</div>
+        </div>
       </div>
 
-      {/* Voting */}
-      {totalVotes > 0 && (
-        <div>
-          <div
-            className="small fw-semibold mb-2"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            LIVE MODEL POLL
-          </div>
+      {/* Overall progress */}
+      <div className="lap-track mb-4">
+        <div className="lap-track-fill" style={{ width: `${stepProgress}%` }} />
+      </div>
 
-          {Object.entries(votes).map(
-            ([label, rawCount]) => {
-              const count = Number(rawCount) || 0;
-              const percentage =
-                totalVotes > 0
-                  ? (count / totalVotes) * 100
-                  : 0;
+      <div className="row g-4">
+        {/* Pipeline stepper */}
+        <div className="col-lg-6">
+          <div className="small fw-semibold mb-3" style={{ color: UI.muted }}>
+            PIPELINE
+          </div>
+          <div className="d-flex flex-column gap-1">
+            {STEP_ORDER.map((step, index) => {
+              const status = stepStatus[step.key] || 'pending';
+              const isDone = status === 'done';
+              const isActive = status === 'active';
+              const isSkipped = status === 'skipped';
+              const state = isDone ? 'done' : isActive ? 'active' : isSkipped ? 'skipped' : 'pending';
 
               return (
                 <div
-                  key={label}
-                  className="d-flex align-items-center gap-2 mb-2"
+                  key={step.key}
+                  className="lap-step d-flex align-items-start gap-3"
+                  style={{ animationDelay: `${index * 50}ms` }}
                 >
-                  <span
-                    className="small"
-                    style={{
-                      width: 55,
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    {label}
-                  </span>
-
-                  <div
-                    className="progress flex-grow-1"
-                    style={{
-                      height: 8,
-                      background: 'var(--bg-elevated)',
-                    }}
-                    role="progressbar"
-                    aria-label={`${label} votes`}
-                    aria-valuenow={percentage}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                  >
-                    <div
-                      className="progress-bar"
-                      style={{
-                        width: `${percentage}%`,
-                        background:
-                          'linear-gradient(90deg, var(--accent-blue), var(--accent-cyan))',
-                        transition: 'width 250ms ease',
-                      }}
-                    />
+                  <div className={`lap-step-icon lap-step-icon--${state}`}>
+                    {isDone ? (
+                      <i className="bi bi-check-lg" />
+                    ) : isActive ? (
+                      <span className="lap-step-spinner" />
+                    ) : isSkipped ? (
+                      <i className="bi bi-dash-lg" />
+                    ) : (
+                      <i className={`bi ${step.icon}`} />
+                    )}
                   </div>
 
-                  <span
-                    className="small fw-bold"
-                    style={{
-                      minWidth: 20,
-                      textAlign: 'right',
-                      color: 'var(--text-primary)',
-                    }}
-                  >
-                    {count}
-                  </span>
+                  <div className="flex-grow-1 pb-3">
+                    <div
+                      className="small fw-semibold"
+                      style={{ color: state === 'pending' ? UI.subtle : UI.text }}
+                    >
+                      {step.label}
+                    </div>
+                    {isSkipped && (
+                      <div className="small" style={{ color: UI.subtle }}>
+                        Skipped for this analysis mode
+                      </div>
+                    )}
+                  </div>
+
+                  {isActive && <span className="lap-live-chip" style={{ color: UI.cyan }}>live</span>}
                 </div>
               );
-            },
+            })}
+          </div>
+        </div>
+
+        {/* Live poll + models + articles */}
+        <div className="col-lg-6 d-flex flex-column gap-4">
+          {totalVotes > 0 && (
+            <div>
+              <div className="small fw-semibold mb-2" style={{ color: UI.muted }}>
+                LIVE MODEL POLL · {totalVotes} vote{totalVotes === 1 ? '' : 's'}
+              </div>
+              <div className="d-flex flex-column gap-2">
+                {Object.entries(votes).map(([voteLabel, rawCount]) => {
+                  const count = Number(rawCount) || 0;
+                  const pct = totalVotes > 0 ? (count / totalVotes) * 100 : 0;
+                  const tone =
+                    voteLabel === 'Fake' || voteLabel === 'Phishing' ? 'danger'
+                    : voteLabel === 'Real' || voteLabel === 'Genuine' || voteLabel === 'Safe' ? 'success'
+                    : 'warning';
+
+                  return (
+                    <div key={voteLabel} className="d-flex align-items-center gap-2">
+                      <span className="small flex-shrink-0" style={{ width: 60, color: UI.muted }}>
+                        {voteLabel}
+                      </span>
+                      <div className="lap-poll-track flex-grow-1" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+                        <div className="lap-poll-fill" style={{ width: `${pct}%`, background: toneColor(tone) }} />
+                      </div>
+                      <span className="small fw-bold flex-shrink-0" style={{ minWidth: 20, textAlign: 'right', color: UI.text }}>
+                        {count}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {models.length > 0 && (
+            <div>
+              <div className="small fw-semibold mb-2" style={{ color: UI.muted }}>
+                MODEL RESPONSES
+              </div>
+              <div className="d-flex flex-column gap-2">
+                {models.map((model) => (
+                  <ModelResult key={modelKey(model)} model={model} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {articles.length > 0 && (
+            <div>
+              <div className="d-flex align-items-center justify-content-between mb-2">
+                <span className="small fw-semibold" style={{ color: UI.muted }}>
+                  RELATED ARTICLES
+                </span>
+                <span className="small" style={{ color: UI.subtle }}>
+                  {analyzedArticleCount}/{articles.length} analyzed
+                </span>
+              </div>
+              <div className="d-flex flex-column">
+                {articles.slice(0, 6).map((article) => (
+                  <ArticleRow key={article.id} article={article} />
+                ))}
+                {articles.length > 6 && (
+                  <div className="small mt-1" style={{ color: UI.subtle }}>
+                    +{articles.length - 6} more
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
-      )}
+      </div>
 
-      {/* Models */}
-      {models.length > 0 && (
-        <div className="d-flex flex-column gap-2">
-          <div
-            className="small fw-semibold"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            MODEL RESPONSES
+      {/* Live event log */}
+      {eventLog.length > 0 && (
+        <details className="lap-log mt-4">
+          <summary className="small fw-semibold d-flex align-items-center gap-2" style={{ color: UI.muted }}>
+            <i className="bi bi-terminal" />
+            Live event log ({eventLog.length})
+          </summary>
+          <div className="mt-2 d-flex flex-column gap-1">
+            {eventLog.map((entry, i) => (
+              <div key={i} style={{ color: UI.subtle }}>
+                <span style={{ color: UI.cyan }}>{entry.time}</span> · {entry.type}
+              </div>
+            ))}
           </div>
-
-          {models.map((model) => (
-            <ModelResult
-              key={modelKey(model)}
-              model={model}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Articles */}
-      {articles.length > 0 && (
-        <div
-          className="small"
-          style={{ color: 'var(--text-muted)' }}
-        >
-          <i className="bi bi-newspaper me-1" />
-
-          {analyzedArticleCount} of {articles.length}{' '}
-          related article
-          {articles.length === 1 ? '' : 's'} analyzed
-        </div>
+        </details>
       )}
     </div>
   );

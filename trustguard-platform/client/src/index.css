@@ -491,3 +491,152 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .verification-seal-inner { transition: none; }
 }
+
+/* ==========================================================
+   Live Analysis Progress + Result Card — premium UI layer
+   ========================================================== */
+
+@keyframes lap-rotate { to { transform: rotate(360deg); } }
+@keyframes lap-pulse {
+  0%, 100% { transform: scale(1); opacity: .55; }
+  50% { transform: scale(1.35); opacity: 0; }
+}
+@keyframes lap-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes lap-shimmer {
+  0% { background-position: -160% 0; }
+  100% { background-position: 160% 0; }
+}
+
+/* ---- LiveAnalysisProgress ---- */
+
+.lap-border-glow {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    var(--accent-cyan) 0%,
+    var(--accent-purple) 25%,
+    transparent 50%,
+    var(--accent-blue) 75%,
+    var(--accent-cyan) 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: lap-rotate 6s linear infinite;
+  opacity: 0.55;
+}
+
+.lap-orb { position: relative; width: 40px; height: 40px; flex-shrink: 0; }
+.lap-orb-core {
+  position: absolute; inset: 8px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+  box-shadow: 0 0 16px var(--accent-cyan-border);
+}
+.lap-orb-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--accent-cyan);
+  animation: lap-pulse 1.8s ease-out infinite;
+}
+
+.lap-timer {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.lap-track { height: 6px; border-radius: 20px; background: var(--track-bg); overflow: hidden; }
+.lap-track-fill {
+  height: 100%; border-radius: 20px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan), var(--accent-blue));
+  background-size: 200% 100%;
+  animation: lap-shimmer 1.8s linear infinite;
+  transition: width 0.5s ease;
+}
+
+.lap-step { animation: lap-fade-up 0.4s ease both; position: relative; }
+.lap-step:not(:last-child)::before {
+  content: ''; position: absolute; left: 15px; top: 34px; bottom: -4px; width: 1px;
+  background: var(--tile-border);
+}
+
+.lap-step-icon {
+  width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.85rem; z-index: 1; transition: all 0.3s ease;
+}
+.lap-step-icon--pending { background: var(--tile-bg); border: 1px solid var(--tile-border); color: var(--text-muted); }
+.lap-step-icon--active {
+  background: var(--accent-cyan-soft); border: 1px solid var(--accent-cyan-border);
+  color: var(--accent-cyan); box-shadow: 0 0 0 4px var(--accent-cyan-soft);
+}
+.lap-step-icon--done { background: var(--success-soft); border: 1px solid var(--success-border); color: var(--success); }
+
+.lap-step-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--accent-cyan-border);
+  border-top-color: var(--accent-cyan);
+  animation: lap-rotate 0.7s linear infinite;
+}
+
+.lap-live-chip {
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  align-self: center; padding: 2px 8px; border-radius: 20px;
+  border: 1px solid var(--accent-cyan-border); background: var(--accent-cyan-soft);
+}
+
+/* ---- ResultCard premium accents ---- */
+
+.rc-premium-card { position: relative; overflow: hidden; }
+.rc-premium-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan), var(--accent-purple));
+  background-size: 200% 100%;
+  animation: lap-shimmer 3s linear infinite;
+}
+
+.rc-eyebrow {
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-weight: 700; letter-spacing: 0.12em;
+}
+
+.rc-tile-hover { transition: transform .25s ease, border-color .25s ease, box-shadow .25s ease; }
+.rc-tile-hover:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-cyan-border);
+  box-shadow: 0 10px 24px rgba(0,0,0,.12);
+}
+
+.rc-fade-up { animation: lap-fade-up 0.45s ease both; }
+
+/* extra states needed by the real SSE-driven LiveAnalysisProgress */
+.lap-step-icon--skipped { background: var(--tile-bg); border: 1px dashed var(--tile-border); color: var(--text-muted); }
+
+.analysis-spin { animation: lap-rotate 0.9s linear infinite; display: inline-block; }
+
+.lap-poll-track { height: 8px; border-radius: 20px; background: var(--track-bg); overflow: hidden; }
+.lap-poll-fill { height: 100%; border-radius: 20px; transition: width 0.35s ease; }
+
+.lap-log {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.72rem;
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--tile-bg);
+  border: 1px solid var(--tile-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.lap-log summary { cursor: pointer; list-style: none; }
+.lap-log summary::-webkit-details-marker { display: none; }
+
+.lap-article-row { border-radius: 10px; transition: background .2s ease; }
+.lap-article-row:hover { background: var(--tile-bg); }

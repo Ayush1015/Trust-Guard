@@ -436,126 +436,59 @@ export const analyzeNews = async (
 /**
  * POST /api/v1/analyze/review
  */
-export const analyzeReview = async (
-  req,
-  res
-) => {
-
+export const analyzeReview = async (req, res) => {
   try {
+    const { text, product_url = '' } = req.body || {};
 
-    const {
-      text
-    } = req.body || {};
-
-    if (
-      typeof text !== 'string' ||
-      text.trim().length < 10
-    ) {
-
-      return res.status(
-        400
-      ).json({
-
-        error: {
-          message:
-            'Review text must be at least 10 characters long.'
-        }
-
+    if (typeof text !== 'string' || text.trim().length < 10) {
+      return res.status(400).json({
+        error: { message: 'Review text must be at least 10 characters long.' }
       });
+    }
+
+    let normalizedProductUrl = '';
+    if (typeof product_url === 'string' && product_url.trim()) {
+      const raw = product_url.trim();
+      try {
+        const candidate = raw.match(/^https?:\/\//i) ? raw : `https://${raw}`;
+        const parsed = new URL(candidate);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          return res.status(400).json({
+            error: { message: 'Product URL must be HTTP or HTTPS.' }
+          });
+        }
+        normalizedProductUrl = parsed.toString();
+      } catch {
+        return res.status(400).json({
+          error: { message: 'Product URL is not a valid URL.' }
+        });
+      }
     }
 
     const headers = {};
-
-    if (
-      process.env.ML_SERVICE_TOKEN
-    ) {
-
-      headers[
-        'X-ML-Service-Token'
-      ] =
-        process.env.ML_SERVICE_TOKEN;
+    if (process.env.ML_SERVICE_TOKEN) {
+      headers['X-ML-Service-Token'] = process.env.ML_SERVICE_TOKEN;
     }
 
-    const mlData =
-      await callMLService(
-        '/analyze/review',
-        {
-          text:
-            text.trim()
-        },
-        {
-          timeout:
-            60000,
-
-          headers
-        }
-      );
-
-    saveHistory(req.userId, 'review', text.trim(), mlData);
-
-    return res.status(
-      200
-    ).json(
-      mlData
+    const mlData = await callMLService(
+      '/analyze/review',
+      { text: text.trim(), product_url: normalizedProductUrl },
+      { timeout: 60000, headers }
     );
 
-
+    return res.status(200).json(mlData);
   } catch (error) {
-
-    console.error(
-      'Error in analyzeReview:',
-      error
-    );
-
-    if (
-      error.name ===
-      'AbortError'
-    ) {
-
-      return res.status(
-        504
-      ).json({
-
-        error: {
-          message:
-            'Review analysis timed out.'
-        }
-
-      });
+    console.error('Error in analyzeReview:', error);
+    if (error.name === 'AbortError') {
+      return res.status(504).json({ error: { message: 'Review analysis timed out.' } });
     }
-
-    if (
-      error.status
-    ) {
-
-      return res.status(
-        error.status >= 400 &&
-        error.status < 600
-          ? error.status
-          : 502
-      ).json({
-
-        error: {
-          message:
-            error.message
-        }
-
-      });
+    if (error.status) {
+      return res.status(error.status >= 400 && error.status < 600 ? error.status : 502)
+        .json({ error: { message: error.message } });
     }
-
-    return res.status(
-      503
-    ).json({
-
-      error: {
-        message:
-          'TrustGuard ML service is unavailable.'
-      }
-
-    });
+    return res.status(503).json({ error: { message: 'TrustGuard ML service is unavailable.' } });
   }
 };
-
 
 // ============================================================
 // REVIEW — FULL PAGE (extension-style: many reviews + ratings at once)

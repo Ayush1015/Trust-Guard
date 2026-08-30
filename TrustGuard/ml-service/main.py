@@ -365,6 +365,10 @@ class TemporalPayload(BaseModel):
     published_at: str = Field(default="")
     mentioned_dates: list[str] = Field(default_factory=list)
 
+class TextPayload(BaseModel):
+    text: str = Field(..., min_length=1, max_length=100_000)
+    product_url: str = Field(default="", max_length=8_000)   # NEW
+
 class ClusterArticleInput(BaseModel):
     id: str
     url: str
@@ -3352,40 +3356,82 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
 def analyze_review(payload: TextPayload):
     content = clean_text(payload.text)
     if len(content) < 10:
-        raise HTTPException(
-            status_code=400,
-            detail="Review must contain at least 10 characters.",
-        )
+        raise HTTPException(status_code=400, detail="Review must contain at least 10 characters.")
 
     predictions = []
-
     local = local_review_prediction(content)
     if local:
         predictions.append(local)
-
-    predictions.extend(
-        pretrained_text_predictions("review", content)
-    )
-
-    # Always-available zero-dependency spam-pattern voter, called once.
-    heuristic_vote = heuristic_review_vote(content, make_prediction)
-    if heuristic_vote:
-        predictions.append(heuristic_vote)
+    predictions.extend(pretrained_text_predictions("review", content))
 
     poll = model_poll(predictions, "Fake Review")
     winner = poll["winner"]
-
-    badge = (
-        "success" if winner == "Genuine"
-        else "danger" if winner == "Fake"
-        else "warning"
-    )
-
+    badge = "success" if winner == "Genuine" else "danger" if winner == "Fake" else "warning"
     fake_votes = poll["votes"].get("Fake", 0)
-    spam_score = (
-        fake_votes / poll["totalVotes"] * 100
-        if poll["totalVotes"] else 0
-    )
+    spam_score = fake_votes / poll["totalVotes"] * 100 if poll["totalVotes"] else 0
+
+    # ---------------- NEW: optional product/seller URL verification ----------------
+    url_verification = None
+    raw_url = clean_text(payload.product_url)
+
+    if raw_url:
+        normalized_url = normalize_url(raw_url)
+        try:
+            validate_public_url(normalized_url)
+        except ValueError as exc:
+            url_verification = {
+                "checked": True,
+                "valid": False,
+                "url": raw_url,
+                "label": "Unknown",
+                "riskLevel": "Unknown",
+                "error": str(exc),
+            }
+        else:
+            url_predictions = []
+            local_url = local_phishing_prediction(normalized_url)
+            if local_url:
+                url_predictions.append(local_url)
+            url_predictions.extend(pretrained_phishing_predictions(normalized_url))
+            bert = bertphish_prediction(normalized_url)
+            if bert:
+                url_predictions.append(bert)
+
+            url_poll = model_poll(url_predictions, "Seller URL")
+            url_winner = url_poll["winner"]
+            data = url_feature_data(normalized_url)
+
+            if url_winner == "Phishing":
+                url_risk = "High" if (not data["ssl"] or data["shady_tld"]) else "Medium"
+            elif url_winner == "Safe":
+                url_risk = "Low"
+            else:
+                url_risk = "Unknown"
+
+            indicators = []
+            if not data["ssl"]:
+                indicators.append("HTTP connection (no SSL)")
+            if data["shady_tld"]:
+                indicators.append("suspicious top-level domain")
+            if data["special_chars"] > 8:
+                indicators.append("high special-character count")
+            if "@" in normalized_url:
+                indicators.append("@ symbol in URL")
+            if data["hostname"] and data["hostname"].count(".") > 3:
+                indicators.append("many subdomains")
+
+            url_verification = {
+                "checked": True,
+                "valid": True,
+                "url": normalized_url,
+                "label": url_winner,          # "Safe" | "Phishing" | "Unknown"
+                "riskLevel": url_risk,
+                "confidence": url_poll["confidence"],
+                "indicators": indicators,
+                "modelVotes": url_poll["votes"],
+                "totalModels": url_poll["totalVotes"],
+            }
+    # ---------------------------------------------------------------------------
 
     return {
         "success": True,
@@ -3397,19 +3443,18 @@ def analyze_review(payload: TextPayload):
             "modelVotes": poll["votes"],
             "weightedVotes": poll["weightedVotes"],
             "totalModels": poll["totalVotes"],
-            "participatingModels": [
-                p["model"] for p in predictions
-            ],
+            "participatingModels": [p["model"] for p in predictions],
         },
         "explanation": (
-            f"{poll['winningVotes']} of {poll['totalVotes']} "
-            f"participating review voters selected {winner}."
+            f"{poll['winningVotes']} of {poll['totalVotes']} participating review voters selected {winner}."
             if winner != "Unknown"
             else "No compatible review model produced a result."
         ),
         "poll": poll,
         "models": predictions,
+        "urlVerification": url_verification,   # NEW
     }
+
 
 @app.get("/models/registry")
 def models_registry():
