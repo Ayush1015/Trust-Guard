@@ -1,3 +1,8 @@
+## At a glance
+Trust Guard analyzes news claims, product reviews and URLs for phishing using a React frontend, Node.js/Express API gateway and Python/FastAPI ML service. The system combines multiple model predictions and supporting evidence rather than depending on a single signal.
+
+### What we built
+we worked on the three-tier architecture and the REST endpoints for health checks, model status and analysis. We implemented ensemble voting that counts only valid model predictions, built the news pipeline to handle different combinations of headline, URL and article text, and added adapters for phishing models with different feature schemas. This is a collaborative project; see the repository history for individual contributions.
 # 🛡️ TrustGuard
 
 ### AI-Powered Multi-Signal Platform for News, Review & Phishing Verification
