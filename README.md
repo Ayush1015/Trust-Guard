@@ -994,47 +994,22 @@ The frontend displays:
 # 📁 Project Structure
 
 ```text
-TrustGuard/
-│
-├── client/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Navbar.jsx
-│   │   │   ├── AuthModal.jsx
-│   │   │   ├── TabNavigation.jsx
-│   │   │   ├── NewsInput.jsx
-│   │   │   ├── ReviewInput.jsx
-│   │   │   ├── PhishingInput.jsx
-│   │   │   ├── ResultCard.jsx
-│   │   │   ├── EvidenceDashboard.jsx
-│   │   │   ├── LiveAnalysisProgress.jsx
-│   │   │   └── ...
-│   │   │
-│   │   ├── App.jsx
-│   │   └── main.jsx
-│   │
-│   ├── .env
-│   ├── package.json
-│   └── vite.config.js
-│
-├── server/
-│   ├── src/
-│   │   ├── routes/
-│   │   ├── controllers/
-│   │   ├── middleware/
-│   │   └── index.js
-│   │
-│   ├── .env
-│   └── package.json
-│
-├── ml-service/
-│   ├── models/
-│   ├── pretrained_models/
-│   ├── main.py
-│   ├── requirements.txt
-│   └── .env
-│
-├── .gitignore
+Trust-Guard/
+├── trustguard-platform/
+│   ├── client/              React + Vite frontend
+│   │   ├── src/
+│   │   └── package.json
+│   └── server/              Express API gateway
+│       ├── src/
+│       ├── tests/
+│       └── package.json
+├── TrustGuard/
+│   └── ml-service/           FastAPI analysis service
+│       ├── main.py
+│       ├── requirements.txt
+│       ├── models/
+│       └── services/
+├── trustguard-extension/    Browser extension
 └── README.md
 ```
 
@@ -1092,7 +1067,7 @@ Search providers
 
 Install:
 
-* Node.js
+* Node.js 22.12 or newer (compatible with the current Vite dependency)
 * npm
 * Python 3.x
 * pip
@@ -1110,8 +1085,8 @@ Optional:
 # 1. Clone Repository
 
 ```bash
-git clone <repository-url>
-cd TrustGuard
+git clone https://github.com/Ayush1015/Trust-Guard.git
+cd Trust-Guard
 ```
 
 ---
@@ -1119,8 +1094,9 @@ cd TrustGuard
 # 2. Install Python Dependencies
 
 ```bash
-cd ml-service
+cd TrustGuard/ml-service
 python -m pip install -r requirements.txt
+cd ../..
 ```
 
 ---
@@ -1130,15 +1106,17 @@ python -m pip install -r requirements.txt
 From the server:
 
 ```bash
-cd ../server
+cd trustguard-platform/server
 npm install
+cd ../..
 ```
 
 From the frontend:
 
 ```bash
-cd ../client
+cd trustguard-platform/client
 npm install
+cd ../..
 ```
 
 ---
@@ -1150,7 +1128,7 @@ npm install
 Create:
 
 ```text
-ml-service/.env
+TrustGuard/ml-service/.env
 ```
 
 Example:
@@ -1194,7 +1172,7 @@ Use the exact variable names supported by the current backend implementation.
 Create:
 
 ```text
-client/.env
+trustguard-platform/client/.env
 ```
 
 Example:
@@ -1209,14 +1187,14 @@ VITE_GEMINI_CONNECT_URL=https://aistudio.google.com/apikey
 
 # ▶️ Running the Application
 
-TrustGuard is easiest to run using three terminals.
+TrustGuard is easiest to run using three terminals, each starting in the cloned repository root (`Trust-Guard`).
 
 ---
 
 ## Terminal 1 — Python ML Service
 
 ```bash
-cd ml-service
+cd TrustGuard/ml-service
 python main.py
 ```
 
@@ -1231,7 +1209,7 @@ http://127.0.0.1:8000
 ## Terminal 2 — Node.js Gateway
 
 ```bash
-cd server
+cd trustguard-platform/server
 npm run dev
 ```
 
@@ -1252,7 +1230,7 @@ http://localhost:5000
 ## Terminal 3 — React Frontend
 
 ```bash
-cd client
+cd trustguard-platform/client
 npm run dev
 ```
 
