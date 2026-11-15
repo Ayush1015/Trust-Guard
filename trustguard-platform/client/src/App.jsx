@@ -22,7 +22,7 @@ const API_BASE_URL = (
 ).replace(/\/+$/, "");
 
 const REQUEST_TIMEOUT = Number(
-  import.meta.env.VITE_REQUEST_TIMEOUT || 120000
+  import.meta.env.VITE_REQUEST_TIMEOUT || 320000
 );
 
 const GEMINI_CONNECT_URL =
@@ -99,7 +99,9 @@ function modelCount(result) {
 }
 
 function getWinner(result) {
-  return result?.poll?.winner || result?.label || null;
+  // Prefer the API's normalized display label (e.g. review writing-origin
+  // labels) so raw model jargon never surfaces in status chrome.
+  return result?.poll?.abstain ? 'Uncertain' : (result?.labelDisplay || result?.poll?.winner || result?.label || null);
 }
 
 function labelTone(label) {
@@ -377,7 +379,10 @@ function App() {
 
   const controllerRef = useRef(null);
   const mountedRef = useRef(true);
-  const [liveMode, setLiveMode] = useState(false);
+  // Live (streaming) analysis is the default news route: the real
+  // search+fetch+NLI pipeline regularly exceeds ordinary request
+  // timeouts, and the stream shows per-step progress and survives it.
+  const [liveMode, setLiveMode] = useState(true);
 
   const saveGeminiKey = useCallback(() => {
     const key = clean(geminiApiKey);
@@ -410,8 +415,8 @@ function App() {
       if (!mountedRef.current) return;
 
       setBackend({
-        status: "online",
-        models: data?.models || null,
+        status: data?.mlService?.status === "UP" && data?.mlService?.modelsReady ? "online" : "offline",
+        models: data?.mlService?.models || null,
       });
     } catch (healthError) {
       if (!mountedRef.current) return;
@@ -484,7 +489,7 @@ function App() {
           method: "POST",
           body: normalized,
           signal: controller.signal,
-          timeout: activeTab === "news" ? 180000 : 60000,
+          timeout: activeTab === "news" ? 320000 : 60000,
           geminiApiKey,
         });
 
@@ -573,8 +578,18 @@ function App() {
     });
   }, [result]);
 
-  const geminiAvailable = Boolean(
-    result?.webVerification?.available
+  // 'Active' only when this analysis actually returned verification
+  // evidence (a classification vote or sources) - not merely when a key
+  // is configured or the provider flag is enabled.
+  const wv = result?.webVerification;
+  // Only a live Gemini pass counts as web verification. The offline
+  // fallback (mode "offline_fallback") returns heuristic related links,
+  // not external verification, so it must never light this tile up.
+  const geminiVerified = Boolean(
+    wv?.mode === "gemini" &&
+    wv?.available &&
+    ((wv?.vote === "Real" || wv?.vote === "Fake") ||
+      (Array.isArray(wv?.sources) && wv.sources.length > 0))
   );
 
   const statusLabel =
@@ -653,9 +668,9 @@ function App() {
             }}
           >
             {user ? `Welcome back, ${user.name}. ` : ""}
-            Detect misinformation, fake reviews and phishing URLs
-            with compatible ML models, ensemble voting and optional
-            Gemini web verification.
+            Analyze news credibility, review writing origin (AI vs
+            human-written) and phishing URLs with compatible ML models,
+            ensemble voting and optional web verification.
           </p>
         </section>
 
@@ -683,16 +698,22 @@ function App() {
               icon="bi-stars"
               title="Gemini"
               value={
-                geminiConfigured
-                  ? "Your key configured"
-                  : geminiAvailable
+                result
+                  ? geminiVerified
                     ? "Web verification active"
+                    : "Not used this analysis"
+                  : geminiConfigured
+                    ? "Your key configured"
                     : "Optional verification"
               }
               detail={
-                geminiConfigured
-                  ? "Used on the next analysis request"
-                  : "Use your own key or server fallback"
+                result && !geminiVerified
+                  ? wv && wv.mode !== "gemini"
+                    ? "Offline mode - no live web verification"
+                    : "No external verification evidence returned"
+                  : geminiConfigured
+                    ? "Used on the next analysis request"
+                    : "Use your own key or server fallback"
               }
               action={
                 <button
@@ -853,14 +874,14 @@ function App() {
             activeTab === "news"
               ? "News Verification"
               : activeTab === "review"
-                ? "Review Verification"
+                ? "Writing Origin Estimate"
                 : "Phishing URL Analysis"
           }
           subtitle={
             activeTab === "news"
               ? "Check a headline, URL, article text, or combine multiple sources for stronger verification."
               : activeTab === "review"
-                ? "Evaluate a product review using compatible local and pretrained classifiers."
+                ? "Estimate whether a review reads as human-written or AI-generated (a writing-style signal, not a truthfulness check)."
                 : "Analyze URL structure and available phishing classifiers."
           }
           className="mb-4"
@@ -881,7 +902,7 @@ function App() {
               </div>
               <div className="verification-seal-face verification-seal-back">
                 <i className={`bi ${result ? "bi-check-lg" : "bi-search"}`} />
-                <span>{result?.label || "VERIFYING"}</span>
+                <span>{result ? "DONE" : "VERIFYING"}</span>
               </div>
             </div>
           </div>
@@ -1015,7 +1036,7 @@ function App() {
       <div className="flex-grow-1">
         <div className="d-flex align-items-center gap-2">
           <div className="fw-semibold" style={{ color: UI.text }}>
-            Certifying this {activeTab === "news" ? "article" : activeTab === "review" ? "review" : "URL"}
+            Analyzing this {activeTab === "news" ? "article" : activeTab === "review" ? "review" : "URL"}
           </div>
           <span
             className="small px-2 py-1 rounded-pill"
@@ -1121,6 +1142,18 @@ function App() {
                 subtitle="Only compatible models that successfully returned a prediction are counted."
                 className="mb-4"
               >
+                {/* Raw vote labels are normalized through each model's
+                    labelDisplay (review: writing-origin labels, never
+                    "Genuine"/deception framing). */}
+                {(() => {
+                  const voteLabelMap = {};
+                  (result.models || []).forEach((m) => {
+                    if (m && m.label && m.labelDisplay) voteLabelMap[m.label] = m.labelDisplay;
+                  });
+                  const displayVoteLabel = (l) => voteLabelMap[l] || l;
+                  const winnerDisplay = result.poll.abstain ? "Uncertain" : (result.labelDisplay || displayVoteLabel(result.poll.winner) || "Unknown");
+                  return (
+                <>
                 <div className="row g-3">
                   {Object.entries(result.poll.votes || {}).map(
                     ([label, votes]) => (
@@ -1134,7 +1167,7 @@ function App() {
                         >
                           <div className="d-flex justify-content-between align-items-center">
                             <span className="fw-semibold" style={{ color: UI.text }}>
-                              {label}
+                              {displayVoteLabel(label)}
                             </span>
                             <ToneBadge tone={labelTone(label)}>
                               {votes} vote{votes === 1 ? "" : "s"}
@@ -1152,10 +1185,10 @@ function App() {
                 >
                   <div>
                     <span className="small" style={{ color: UI.muted }}>
-                      Final winner
+                      Model vote outcome
                     </span>
                     <div className="fw-bold fs-5" style={{ color: UI.text }}>
-                      {result.poll.winner || "Unknown"}
+                      {winnerDisplay}
                     </div>
                   </div>
 
@@ -1169,6 +1202,9 @@ function App() {
                     </div>
                   </div>
                 </div>
+                </>
+                  );
+                })()}
               </SectionCard>
             )}
 
