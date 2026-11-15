@@ -1,8 +1,11 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import db from '../db/index.js';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-insecure-secret-change-me';
+// Single source of truth for the signing secret: middleware/auth.js
+// hard-fails at boot in production when JWT_SECRET is unset. Reusing its
+// SECRET keeps signing and verification on the same value and removes the
+// second silent fallback that used to live here.
+import { AUTH_JWT_SECRET as JWT_SECRET } from '../middleware/auth.js';
 const TOKEN_EXPIRY = '7d';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
