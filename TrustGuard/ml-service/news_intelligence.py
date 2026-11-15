@@ -47,7 +47,7 @@ from collections import Counter
 from typing import Any, Callable, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, unquote, urlparse
-from adapters.search_adapter import DuckDuckGoSearchAdapter, SearchResult, SearchService
+from adapters.search_adapter import SearchResult, build_default_search_service
 from services.cache_service import (
     article_cache,
     make_article_cache_key,
@@ -56,7 +56,7 @@ from services.cache_service import (
 )
  
 import requests
-_search_service = SearchService([DuckDuckGoSearchAdapter()])
+_search_service = build_default_search_service()
  
 
 logger = logging.getLogger("trustguard.news_intel")
@@ -131,7 +131,15 @@ def _duckduckgo_search(query: str, limit: int) -> list[dict[str, str]]:
             "https://html.duckduckgo.com/html/",
             params={"q": query.strip()},
             timeout=8,
-            headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"},
+            # A bot-looking UA gets a 202 anti-bot challenge with zero
+            # results; a real browser UA gets the HTML results page.
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+            },
         )
         resp.raise_for_status()
     except Exception as exc:
@@ -179,24 +187,50 @@ def search_related_articles(
         return cached
 
     links = _duckduckgo_search(query, limit=limit)
-    articles: list[dict[str, str]] = []
-
-    for link in links:
+    if not links:
+        # DDG's HTML endpoint rate-limits some egress IPs; fall back to
+        # the SearchService adapters (ddgs multi-backend + GDELT).
         try:
-            extracted = extract_article_fn(link["url"])
+            links = [
+                {"title": r.title, "url": r.url}
+                for r in _run_search(query, limit)
+            ][:limit]
         except Exception as exc:
-            logger.debug("related-article extraction failed for %s: %s", link["url"], exc)
-            continue
+            logger.debug("search-service fallback failed: %s", exc)
+            links = []
 
-        text = (extracted or {}).get("text", "")
-        if len(text) < 100:  # too little text to be a useful cross-check
-            continue
+    # Fetch articles in parallel: up to `limit` network-bound extractions
+    # run sequentially here otherwise, which dominated request latency.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        articles.append({
-            "title": link["title"],
-            "url": link["url"],
-            "text": text,
-        })
+    articles: list[dict[str, str]] = []
+    workers = max(1, min(4, len(links)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(extract_article_fn, link["url"]): link
+            for link in links
+        }
+        for future in as_completed(futures):
+            link = futures[future]
+            try:
+                extracted = future.result()
+            except Exception as exc:
+                logger.debug(
+                    "related-article extraction failed for %s: %s",
+                    link["url"], exc,
+                )
+                continue
+
+            text = (extracted or {}).get("text", "")
+            if len(text) < 100:  # too little text to be a useful cross-check
+                continue
+
+            articles.append({
+                "title": link["title"],
+                "url": link["url"],
+                "text": text,
+                "published_at": (extracted or {}).get("published_at"),
+            })
 
     _cache_set(cache_key, articles)
     return articles
@@ -484,9 +518,23 @@ def collect_related_articles(
     import was one of the two reasons the service failed to start."""
     seen_urls: set[str] = set()
     combined: list[dict] = []
+    used_queries = queries[:2]
 
-    for query in queries[:3]:
-        for result in _cached_search(query, max_results):
+    # Queries run in parallel: each one can take 10s+ through the
+    # multi-backend ddgs adapter, so running them sequentially dominated
+    # /analyze/news latency.
+    from concurrent.futures import ThreadPoolExecutor
+
+    per_query: list[list] = [[] for _ in used_queries]
+    with ThreadPoolExecutor(max_workers=max(1, len(used_queries))) as executor:
+        for idx, results in zip(
+            range(len(used_queries)),
+            executor.map(lambda q: _cached_search(q, max_results), used_queries),
+        ):
+            per_query[idx] = list(results or [])
+
+    for query, results in zip(used_queries, per_query):
+        for result in results:
             if result.url in seen_urls:
                 continue
             seen_urls.add(result.url)
@@ -494,7 +542,7 @@ def collect_related_articles(
 
     return {
         "primaryLabel": primary_label,
-        "queriesUsed": queries[:3],
+        "queriesUsed": used_queries,
         "articles": combined[:10],
     }
 
