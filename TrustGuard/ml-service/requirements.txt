@@ -24,3 +24,6 @@ beautifulsoup4
 
 # Install a matching torch/torchvision pair for BERTPhish.
 # Example: use the official PyTorch selector for your CPU/CUDA setup.
+# Claim-level entailment voter (local ONNX NLI, no API key)
+onnxruntime>=1.17
+tokenizers>=0.15
