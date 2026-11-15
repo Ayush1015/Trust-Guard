@@ -281,6 +281,170 @@ class DuckDuckGoSearchAdapter(SearchAdapter):
 
 
 # ---------------------------------------------------------------------------
+# GDELT adapter (free news API, no key)
+# ---------------------------------------------------------------------------
+
+_GDELT_MIN_INTERVAL_SECONDS = 5.5  # GDELT asks for one request per 5 seconds
+_gdelt_last_call = 0.0
+
+
+class GdeltSearchAdapter(SearchAdapter):
+    """News search via the GDELT 2.0 Doc API.
+
+    Free, no API key, returns real published dates and source domains -
+    useful provenance for related coverage. GDELT rate-limits to one
+    request every 5 seconds, so calls are spaced out and capped; this
+    adapter is a supplement to the general web search adapter, not a
+    replacement for it.
+    """
+
+    name = "gdelt"
+
+    def search(self, query: str, max_results: int = 10) -> list[SearchResult]:
+        global _gdelt_last_call
+
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        max_results = max(1, min(int(max_results), 25))
+
+        # GDELT query language: quote multi-word phrases.
+        gdelt_query = f'"{query}"' if " " in query else query
+
+        import time as _time
+
+        import requests as _requests
+
+        wait = _GDELT_MIN_INTERVAL_SECONDS - (_time.time() - _gdelt_last_call)
+        if wait > 0:
+            _time.sleep(wait)
+
+        try:
+            resp = _requests.get(
+                "https://api.gdeltproject.org/api/v2/doc/doc",
+                params={
+                    "query": gdelt_query,
+                    "mode": "artlist",
+                    "maxrecords": max_results,
+                    "format": "json",
+                    "sortby": "hybridrel",
+                },
+                timeout=20,
+                headers={"User-Agent": "TrustGuard/1.0 (research demo)"},
+            )
+            _gdelt_last_call = _time.time()
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            _gdelt_last_call = _time.time()
+            logger.warning("[SEARCH] gdelt query failed (%r): %s", query, exc)
+            return []
+
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        results: list[SearchResult] = []
+
+        for rank, item in enumerate(data.get("articles") or [], start=1):
+            raw_url = str(item.get("url") or "").strip()
+            if not is_valid_http_url(raw_url):
+                continue
+            seen_date = str(item.get("seendate") or "").strip()
+            published_at = None
+            if re.fullmatch(r"\d{14}", seen_date):
+                published_at = (
+                    f"{seen_date[0:4]}-{seen_date[4:6]}-{seen_date[6:8]}"
+                )
+            results.append(
+                SearchResult(
+                    title=str(item.get("title") or "").strip(),
+                    url=raw_url,
+                    domain=str(item.get("domain") or get_domain(raw_url)).strip().lower(),
+                    snippet="",
+                    published_at=published_at,
+                    retrieved_at=retrieved_at,
+                    rank=rank,
+                    search_query=query,
+                    source_type="news",
+                )
+            )
+
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Tavily adapter (keyed; free tier 1,000 credits/month, no card - verified
+# against tavily.com/pricing on 2026-11-15). Used only when TAVILY_API_KEY
+# is set; the keyless adapters remain as fallback.
+# ---------------------------------------------------------------------------
+
+class TavilySearchAdapter(SearchAdapter):
+    name = "tavily"
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def search(self, query: str, max_results: int = 10) -> list[SearchResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+        max_results = max(1, min(int(max_results), 20))
+
+        import requests as _requests
+
+        try:
+            resp = _requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": self.api_key,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                    "include_answer": False,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("[SEARCH] tavily query failed (%r): %s", query, exc)
+            return []
+
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        results: list[SearchResult] = []
+        for rank, item in enumerate(data.get("results") or [], start=1):
+            raw_url = str(item.get("url") or "").strip()
+            if not is_valid_http_url(raw_url):
+                continue
+            results.append(
+                SearchResult(
+                    title=str(item.get("title") or "").strip(),
+                    url=raw_url,
+                    domain=get_domain(raw_url),
+                    snippet=str(item.get("content") or "").strip(),
+                    published_at=item.get("published_date") or None,
+                    retrieved_at=retrieved_at,
+                    rank=rank,
+                    search_query=query,
+                    source_type="web",
+                )
+            )
+        return results
+
+
+def build_default_search_service() -> "SearchService":
+    """Adapters in priority order: keyed Tavily first when configured
+    (reliable, official free tier), then keyless DuckDuckGo + GDELT."""
+    import os as _os
+
+    adapters: list[SearchAdapter] = []
+    tavily_key = (_os.getenv("TAVILY_API_KEY") or "").strip()
+    if tavily_key:
+        adapters.append(TavilySearchAdapter(tavily_key))
+    adapters.extend([DuckDuckGoSearchAdapter(), GdeltSearchAdapter()])
+    return SearchService(adapters)
+
+
+# ---------------------------------------------------------------------------
 # Search service
 # ---------------------------------------------------------------------------
 
