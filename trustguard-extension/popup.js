@@ -1,542 +1,84 @@
-const ext = typeof browser !== "undefined" ? browser : chrome;
-
-function sendMessage(message) {
-  return new Promise((resolve) => {
-    try {
-      ext.runtime.sendMessage(message, (response) => resolve(response || { ok: false }));
-    } catch {
-      resolve({ ok: false, error: "Extension messaging failed." });
-    }
-  });
+'use strict';
+const $ = id => document.getElementById(id);
+const DEFAULT_API = 'http://localhost:5000/api/v1';
+let apiBase = DEFAULT_API;
+let activeTab = null;
+function validApi(value) {
+  const u = new URL(value);
+  if (u.username || u.password || u.search || u.hash) throw new Error('Use an API URL without credentials, query or fragment.');
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Use HTTPS, or local HTTP on localhost/127.0.0.1.');
+  return u.href.replace(/\/+$/, '');
 }
-
-function toneFor(label) {
-  const v = String(label || "").toLowerCase();
-  if (v.includes("fake") || v.includes("phishing") || v.includes("error")) return "tone-danger";
-  if (v.includes("real") || v.includes("genuine") || v.includes("safe")) return "tone-success";
-  return "tone-warning";
-}
-
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str ?? "";
-  return div.innerHTML;
-}
-
-const els = {
-  root: document.documentElement,
-  themeBtn: document.getElementById("tg-theme-btn"),
-  dot: document.getElementById("tg-dot"),
-  statusText: document.getElementById("tg-status-text"),
-  tabs: document.querySelectorAll(".tg-tab"),
-  panels: {
-    news: document.getElementById("panel-news"),
-    review: document.getElementById("panel-review"),
-    phishing: document.getElementById("panel-phishing"),
-    history: document.getElementById("panel-history"),
-    account: document.getElementById("panel-account"),
-  },
-  result: document.getElementById("result"),
-  loading: document.getElementById("loading"),
-  error: document.getElementById("error"),
-  successMsg: document.getElementById("success-msg"),
-  autoScanToggle: document.getElementById("autoscan-toggle"),
-  settingsBtn: document.getElementById("tg-settings-btn"),
-  lastEmpty: document.getElementById("last-result-empty"),
-  lastResult: document.getElementById("last-result"),
-};
-
-// ------------------------------------------------------------
-// THEME
-// ------------------------------------------------------------
-
-async function applyTheme(theme) {
-  if (theme === "system") {
-    els.root.removeAttribute("data-theme");
-  } else {
-    els.root.setAttribute("data-theme", theme);
-  }
-}
-
-async function initTheme() {
-  const stored = await ext.storage.local.get("theme");
-  await applyTheme(stored.theme || "system");
-}
-
-els.themeBtn.addEventListener("click", async () => {
-  const current = els.root.getAttribute("data-theme") || "system";
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const effectiveCurrent = current === "system" ? (prefersDark ? "dark" : "light") : current;
-  const next = effectiveCurrent === "light" ? "dark" : "light";
-
-  await applyTheme(next);
-  await ext.storage.local.set({ theme: next });
-});
-
-// ------------------------------------------------------------
-// UI HELPERS
-// ------------------------------------------------------------
-
-function clearStateBlocks() {
-  els.result.hidden = true;
-  els.error.hidden = true;
-  els.successMsg.hidden = true;
-}
-
-function showResult({ label, confidence, explanation }) {
-  clearStateBlocks();
-  els.result.hidden = false;
-  els.result.innerHTML = `
-    <span class="tg-result-label ${toneFor(label)}">${escapeHtml(label ?? "Unknown")}</span>
-    ${confidence != null ? `<div class="tg-muted">Confidence: ${confidence}%</div>` : ""}
-    ${explanation ? `<div class="tg-result-explanation">${escapeHtml(explanation)}</div>` : ""}
-  `;
-}
-
-function showError(message) {
-  clearStateBlocks();
-  els.error.hidden = false;
-  els.error.textContent = message;
-}
-
-function showSuccess(message) {
-  clearStateBlocks();
-  els.successMsg.hidden = false;
-  els.successMsg.textContent = message;
-}
-
-function setLoading(isLoading) {
-  els.loading.hidden = !isLoading;
-  if (isLoading) {
-    els.result.hidden = true;
-    els.error.hidden = true;
-    els.successMsg.hidden = true;
-  }
-}
-
-// ------------------------------------------------------------
-// TABS
-// ------------------------------------------------------------
-
-els.tabs.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    els.tabs.forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-
-    Object.entries(els.panels).forEach(([key, panel]) => {
-      panel.hidden = key !== btn.dataset.tab;
-    });
-
-    clearStateBlocks();
-
-    if (btn.dataset.tab === "history") loadHistoryTab();
-    if (btn.dataset.tab === "account") loadAccountTab();
-  });
-});
-
-// ------------------------------------------------------------
-// SERVER STATUS
-// ------------------------------------------------------------
-
-async function refreshStatus() {
-  const config = await sendMessage({ action: "trustguard-get-config" });
-  const base = (config?.apiBase || "").replace(/\/api\/v1$/, "");
-
-  els.dot.className = "tg-dot checking";
-  els.statusText.textContent = "Checking server…";
-
+function errorText(err) { return err.name === 'AbortError' ? 'The server took too long. No final assessment is available.' : err.message || 'Check failed.'; }
+async function call(path, payload) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
   try {
-    const res = await fetch(`${base}/health`, { method: "GET" });
-    if (res.ok) {
-      els.dot.className = "tg-dot online";
-      els.statusText.textContent = "Server online";
+    const res = await fetch(apiBase + path, {method:payload ? 'POST':'GET',headers:{'Content-Type':'application/json'},body:payload ? JSON.stringify(payload):undefined,signal:controller.signal});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error?.message || data.detail || `Server returned ${res.status}`);
+    return data;
+  } finally { clearTimeout(timeout); }
+}
+async function status() {
+  try {
+    const data = await call('/analyze/health');
+    $('status').textContent = data.mlService?.status === 'UP' || data.mlService?.modelsReady ? 'Backend connected. ML service online.' : 'Gateway connected. Check ML service availability.';
+  } catch (e) { $('status').textContent = 'Backend unavailable: ' + errorText(e); }
+}
+function showError(e) { $('result-box').hidden=false; $('result-title').textContent='No assessment'; $('result').textContent=errorText(e); $('result-box').scrollIntoView({block:'start'}); }
+async function readPage(selectionOnly) {
+  try {
+    if (!activeTab?.id || !/^https?:/.test(activeTab.url || '')) throw new Error('Open a normal HTTP(S) web page first. Browser settings and store pages cannot be read.');
+    const [out] = await chrome.scripting.executeScript({target:{tabId:activeTab.id},func:only => only ? window.getSelection().toString().slice(0,10000) : (document.querySelector('article') || document.querySelector('main') || document.body).innerText.slice(0,10000),args:[selectionOnly]});
+    $('text').value = out.result || '';
+    if (!$('text').value.trim()) throw new Error('No text found. Select a passage or paste text into the preview.');
+    $('status').textContent='Text is in the preview only. Choose a check to send it.';
+  } catch(e) { showError(e); }
+}
+function render(data, type) {
+  $('result-box').hidden=false;
+  $('result-title').textContent = type === 'review' ? 'Writing-origin estimate' : type === 'phishing' ? 'URL risk estimate' : 'News assessment';
+  const label = data.poll?.abstain ? 'Uncertain - insufficient model agreement' : (data.labelDisplay || data.label || 'Not verified');
+  const lines = [label];
+  if (data.confidence != null) lines.push(`Model score: ${data.confidence}% (not calibrated probability of truth or safety)`);
+  if (data.explanation) lines.push(typeof data.explanation === 'string' ? data.explanation : JSON.stringify(data.explanation));
+  if (type === 'review') lines.push('AI-like or human-like wording does not prove deception or authenticity.');
+  if (type === 'news') lines.push('Source agreement is estimated. A source can repeat a false claim.');
+  $('result').textContent=lines.join('\n\n');
+  // Keep source evidence as plain text; never execute page or server markup.
+  const verification = data.claimVerification || data.claim_verification;
+  $('result-box').scrollIntoView({block:'start'});
+  const articles = verification?.sources || verification?.articles || verification?.results || [];
+  for (const item of articles.slice(0,5)) {
+    const block = document.createElement('blockquote');
+    block.textContent = `${item.verdict || item.stance || 'inconclusive'}: ${item.matchedPassage || item.matched_passage || 'No matched passage'}`;
+    $('result').append(block);
+    try { const u=new URL(item.url); if(u.protocol==='https:' || u.protocol==='http:') {const a=document.createElement('a');a.textContent=u.hostname;a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';$('result').append(a);} } catch {}
+  }
+}
+async function check(type) {
+  const buttons=[...document.querySelectorAll('button')];
+  try {
+    let payload;
+    if(type==='phishing') {
+      if(!activeTab?.url || !/^https?:/.test(activeTab.url)) throw new Error('Open a normal web page first.');
+      payload={url:activeTab.url};
     } else {
-      els.dot.className = "tg-dot offline";
-      els.statusText.textContent = "Server error";
+      const text=$('text').value.trim();
+      if(text.length<10) throw new Error('Add at least 10 characters of claim or review text first.');
+      payload={text};
     }
-  } catch {
-    els.dot.className = "tg-dot offline";
-    els.statusText.textContent = "Server unreachable";
-  }
+    buttons.forEach(b=>b.disabled=true); $('result-box').hidden=false; $('result-title').textContent='Checking...'; $('result').textContent='Waiting for the TrustGuard server. Keep this popup open.';
+    render(await call('/analyze/'+type,payload),type);
+  } catch(e) {showError(e);} finally {buttons.forEach(b=>b.disabled=false);}
 }
-
-// ------------------------------------------------------------
-// NEWS (with optional streaming via /analyze/news/stream)
-// ------------------------------------------------------------
-
-document.getElementById("news-submit").addEventListener("click", async () => {
-  const text = document.getElementById("news-text").value.trim();
-  if (text.length < 15) return showError("Enter at least 15 characters.");
-
-  const streaming = document.getElementById("news-stream-toggle").checked;
-
-  if (!streaming) {
-    setLoading(true);
-    const res = await sendMessage({
-      action: "trustguard-analyze-news",
-      payload: { headline: text, text },
-    });
-    setLoading(false);
-
-    if (res.ok) showResult(res.data);
-    else showError(res.error || "News analysis failed.");
-    return;
-  }
-
-  // Streaming path talks directly to the API so we can read the response
-  // body incrementally. Assumption: /analyze/news/stream sends
-  // newline-delimited JSON chunks (optionally prefixed with "data:", as
-  // in SSE) that eventually include a final chunk with label/confidence.
-  clearStateBlocks();
-  setLoading(true);
-  els.result.hidden = false;
-  els.result.innerHTML = `<div class="tg-result-explanation" id="stream-output"></div>`;
-  const streamOut = document.getElementById("stream-output");
-
-  try {
-    const config = await sendMessage({ action: "trustguard-get-config" });
-    const auth = await sendMessage({ action: "trustguard-get-auth" });
-    const base = config?.apiBase || "http://localhost:5000/api/v1";
-
-    const response = await fetch(`${base}/analyze/news/stream`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(auth?.token ? { Authorization: `Bearer ${auth.token}` } : {}),
-      },
-      body: JSON.stringify({ headline: text, text }),
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`Stream request failed (${response.status})`);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let latest = null;
-
-    setLoading(false);
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop(); // keep last partial line
-
-      for (const rawLine of lines) {
-        const line = rawLine.replace(/^data:\s*/, "").trim();
-        if (!line) continue;
-
-        try {
-          const parsed = JSON.parse(line);
-          latest = parsed;
-          const chunkText = parsed.chunk || parsed.text || parsed.explanation || "";
-          if (chunkText) streamOut.textContent += chunkText;
-        } catch {
-          // Not JSON — treat as a raw text token from the stream.
-          streamOut.textContent += line;
-        }
-      }
-    }
-
-    if (latest?.label) {
-      els.result.innerHTML =
-        `<span class="tg-result-label ${toneFor(latest.label)}">${escapeHtml(latest.label)}</span>` +
-        (latest.confidence != null ? `<div class="tg-muted">Confidence: ${latest.confidence}%</div>` : "") +
-        `<div class="tg-result-explanation">${escapeHtml(streamOut.textContent)}</div>`;
-    }
-  } catch (error) {
-    setLoading(false);
-    showError(error.message || "Streaming analysis failed.");
-  }
+$('save').addEventListener('click',async()=>{
+  try {const next=validApi($('api').value.trim());const u=new URL(next);if(u.protocol==='https:') {const granted=await chrome.permissions.request({origins:[u.origin+'/*']});if(!granted)throw new Error('Backend access was not allowed.');}apiBase=next;await chrome.storage.local.set({apiBaseUrl:apiBase});await status();}catch(e){showError(e);}
 });
-
-// ------------------------------------------------------------
-// REVIEW (single + full-page bulk via /analyze/review/page)
-// ------------------------------------------------------------
-
-document.getElementById("review-submit").addEventListener("click", async () => {
-  const text = document.getElementById("review-text").value.trim();
-  if (text.length < 10) return showError("Enter at least 10 characters.");
-
-  setLoading(true);
-  const res = await sendMessage({ action: "trustguard-analyze-review", payload: { text } });
-  setLoading(false);
-
-  if (res.ok) showResult(res.data);
-  else showError(res.error || "Review analysis failed.");
-});
-
-document.getElementById("review-page-submit").addEventListener("click", async () => {
-  const resultsBox = document.getElementById("review-page-results");
-  resultsBox.innerHTML = "";
-  setLoading(true);
-
-  try {
-    const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("No active tab.");
-
-    const collected = await ext.tabs.sendMessage(tab.id, { action: "trustguard-collect-reviews" });
-    const texts = collected?.texts || [];
-
-    if (!texts.length) {
-      setLoading(false);
-      showError("No review-like text blocks were found on this page.");
-      return;
-    }
-
-    const res = await sendMessage({ action: "trustguard-analyze-review-page", texts });
-    setLoading(false);
-
-    if (!res.ok) {
-      showError(res.error || "Bulk review scan failed.");
-      return;
-    }
-
-    // Assumption: data.results is an array of { text, label, confidence,
-    // explanation }. Falls back to showing the raw texts if the backend
-    // returns a different shape.
-    const items = res.data?.results || res.data?.items || [];
-
-    if (!items.length) {
-      showError("The server did not return per-review results.");
-      return;
-    }
-
-    clearStateBlocks();
-    resultsBox.innerHTML = items
-      .map(
-        (item) => `
-        <div class="tg-review-item">
-          <span class="tg-result-label ${toneFor(item.label)}">${escapeHtml(item.label ?? "Unknown")}</span>
-          <div class="tg-result-explanation">${escapeHtml((item.text || "").slice(0, 140))}</div>
-        </div>`
-      )
-      .join("");
-  } catch (error) {
-    setLoading(false);
-    showError(error.message || "Could not scan this page. Try reloading it first.");
-  }
-});
-
-// ------------------------------------------------------------
-// PHISHING
-// ------------------------------------------------------------
-
-document.getElementById("url-submit").addEventListener("click", async () => {
-  const url = document.getElementById("url-input").value.trim();
-  if (!url) return showError("Enter a URL.");
-
-  setLoading(true);
-  const res = await sendMessage({ action: "trustguard-analyze-phishing", payload: { url } });
-  setLoading(false);
-
-  if (res.ok) showResult(res.data);
-  else showError(res.error || "Phishing scan failed.");
-});
-
-// ------------------------------------------------------------
-// HISTORY (local last-scan + account history)
-// ------------------------------------------------------------
-
-async function loadHistoryTab() {
-  const lastRes = await sendMessage({ action: "trustguard-get-last-result" });
-  const last = lastRes?.result;
-
-  if (!last) {
-    els.lastEmpty.hidden = false;
-    els.lastResult.hidden = true;
-  } else {
-    els.lastEmpty.hidden = true;
-    els.lastResult.hidden = false;
-    els.lastResult.innerHTML = `
-      <div class="tg-muted" style="margin-bottom:6px;">
-        ${escapeHtml((last.type || "").toUpperCase())} · ${new Date(last.timestamp).toLocaleTimeString()}
-      </div>
-      <span class="tg-result-label ${toneFor(last.label)}">${escapeHtml(last.label ?? "Unknown")}</span>
-      <div class="tg-result-explanation" style="margin-top:8px;">${escapeHtml((last.input || "").slice(0, 160))}</div>
-      ${last.explanation ? `<div class="tg-result-explanation" style="margin-top:6px;">${escapeHtml(last.explanation)}</div>` : ""}
-    `;
-  }
-
-  const auth = await sendMessage({ action: "trustguard-get-auth" });
-  const signInHint = document.getElementById("history-signin-hint");
-  const accountBlock = document.getElementById("account-history-block");
-
-  if (!auth?.token) {
-    signInHint.hidden = false;
-    accountBlock.hidden = true;
-    return;
-  }
-
-  signInHint.hidden = true;
-  accountBlock.hidden = false;
-
-  const listEl = document.getElementById("history-list");
-  const detailEl = document.getElementById("history-detail");
-  detailEl.hidden = true;
-  listEl.innerHTML = `<div class="tg-muted">Loading…</div>`;
-
-  const res = await sendMessage({ action: "trustguard-history" });
-  if (!res.ok) {
-    listEl.innerHTML = `<div class="tg-muted">Could not load history: ${escapeHtml(res.error || "")}</div>`;
-    return;
-  }
-
-  // Assumption: data.items is an array of { id, type, label, input, createdAt }.
-  const items = res.data?.items || res.data?.history || [];
-
-  if (!items.length) {
-    listEl.innerHTML = `<div class="tg-muted">No saved analyses yet.</div>`;
-    return;
-  }
-
-  listEl.innerHTML = "";
-  for (const item of items) {
-    const row = document.createElement("div");
-    row.className = "tg-history-item";
-    row.innerHTML = `
-      <div class="tg-history-meta">
-        <span class="tg-history-type">${escapeHtml(item.type || "")}</span>
-        <span class="tg-history-snippet">${escapeHtml(item.input || item.headline || item.url || "")}</span>
-      </div>
-      <span class="tg-result-label ${toneFor(item.label)}">${escapeHtml(item.label ?? "")}</span>
-    `;
-    row.addEventListener("click", () => loadHistoryDetail(item.id));
-    listEl.appendChild(row);
-  }
-}
-
-async function loadHistoryDetail(id) {
-  const detailEl = document.getElementById("history-detail");
-  detailEl.hidden = false;
-  detailEl.innerHTML = `<div class="tg-muted">Loading detail…</div>`;
-
-  const res = await sendMessage({ action: "trustguard-history-detail", id });
-  if (!res.ok) {
-    detailEl.innerHTML = `<div class="tg-muted">${escapeHtml(res.error || "Could not load detail.")}</div>`;
-    return;
-  }
-
-  const data = res.data?.item || res.data;
-  detailEl.innerHTML = `
-    <div class="tg-result" style="margin-top:8px;">
-      <span class="tg-result-label ${toneFor(data.label)}">${escapeHtml(data.label ?? "Unknown")}</span>
-      ${data.confidence != null ? `<div class="tg-muted">Confidence: ${data.confidence}%</div>` : ""}
-      ${data.explanation ? `<div class="tg-result-explanation">${escapeHtml(data.explanation)}</div>` : ""}
-    </div>
-  `;
-}
-
-// ------------------------------------------------------------
-// ACCOUNT / AUTH
-// ------------------------------------------------------------
-
-async function loadAccountTab() {
-  const auth = await sendMessage({ action: "trustguard-get-auth" });
-  const signedOut = document.getElementById("account-signed-out");
-  const signedIn = document.getElementById("account-signed-in");
-
-  if (!auth?.token) {
-    signedOut.hidden = false;
-    signedIn.hidden = true;
-    return;
-  }
-
-  signedOut.hidden = true;
-  signedIn.hidden = false;
-
-  document.getElementById("account-name").textContent = auth.user?.name || "Signed in";
-  document.getElementById("account-email").textContent = auth.user?.email || "";
-
-  // Refresh from /auth/me in case the token/quota changed server-side.
-  const me = await sendMessage({ action: "trustguard-me" });
-  if (me.ok) {
-    const usage = me.data?.usage;
-    const quotaWrap = document.getElementById("account-quota-wrap");
-    if (usage && usage.limit) {
-      quotaWrap.hidden = false;
-      const pct = Math.min(100, Math.round((usage.used / usage.limit) * 100));
-      document.getElementById("account-quota-text").textContent =
-        `${usage.used} / ${usage.limit} requests used`;
-      document.getElementById("account-quota-fill").style.width = `${pct}%`;
-    } else {
-      quotaWrap.hidden = true;
-    }
-
-    if (me.data?.user) {
-      document.getElementById("account-name").textContent = me.data.user.name || "Signed in";
-      document.getElementById("account-email").textContent = me.data.user.email || "";
-    }
-  }
-}
-
-document.getElementById("login-submit").addEventListener("click", async () => {
-  const email = document.getElementById("auth-email").value.trim();
-  const password = document.getElementById("auth-password").value;
-  if (!email || !password) return showError("Enter email and password.");
-
-  setLoading(true);
-  const res = await sendMessage({ action: "trustguard-login", payload: { email, password } });
-  setLoading(false);
-
-  if (res.ok) {
-    showSuccess("Logged in.");
-    loadAccountTab();
-  } else {
-    showError(res.error || "Login failed.");
-  }
-});
-
-document.getElementById("signup-submit").addEventListener("click", async () => {
-  const email = document.getElementById("auth-email").value.trim();
-  const password = document.getElementById("auth-password").value;
-  if (!email || !password) return showError("Enter email and password.");
-
-  setLoading(true);
-  const res = await sendMessage({ action: "trustguard-signup", payload: { email, password } });
-  setLoading(false);
-
-  if (res.ok) {
-    showSuccess("Account created.");
-    loadAccountTab();
-  } else {
-    showError(res.error || "Sign up failed.");
-  }
-});
-
-document.getElementById("logout-btn").addEventListener("click", async () => {
-  await sendMessage({ action: "trustguard-logout" });
-  loadAccountTab();
-});
-
-// ------------------------------------------------------------
-// AUTO-SCAN TOGGLE
-// ------------------------------------------------------------
-
-async function initAutoScanToggle() {
-  const config = await sendMessage({ action: "trustguard-get-config" });
-  els.autoScanToggle.checked = Boolean(config?.autoScanEnabled);
-}
-
-els.autoScanToggle.addEventListener("change", async () => {
-  await sendMessage({
-    action: "trustguard-set-config",
-    autoScanEnabled: els.autoScanToggle.checked,
-  });
-});
-
-els.settingsBtn.addEventListener("click", () => {
-  if (ext.runtime.openOptionsPage) ext.runtime.openOptionsPage();
-});
-
-// ------------------------------------------------------------
-// INIT
-// ------------------------------------------------------------
-
-initTheme();
-refreshStatus();
-initAutoScanToggle();
+$('read-selection').addEventListener('click',()=>readPage(true));
+$('read-page').addEventListener('click',()=>readPage(false));
+$('news-check').addEventListener('click',()=>check('news'));
+$('review-check').addEventListener('click',()=>check('review'));
+$('url-check').addEventListener('click',()=>check('phishing'));
+(async()=>{const saved=await chrome.storage.local.get('apiBaseUrl');try{apiBase=validApi(saved.apiBaseUrl || DEFAULT_API);}catch{}$('api').value=apiBase;[activeTab]=await chrome.tabs.query({active:true,currentWindow:true});$('page-url').textContent=activeTab?.url || 'No page selected';await status();})();
