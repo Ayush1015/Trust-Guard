@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bs4 import BeautifulSoup 
-from adapters.search_adapter import DuckDuckGoSearchAdapter, SearchService, SearchResult
+from adapters.search_adapter import SearchResult, build_default_search_service
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -205,11 +205,11 @@ SHADY_NEWS_PATTERNS = ("blogspot", "wordpress.com/20", "wixsite", ".click", "vir
 # WHOIS domain-age lookups are a real network call with real latency, so
 # they stay opt-in rather than firing on every phishing check by default.
 ENABLE_DOMAIN_AGE_LOOKUP = os.getenv("ENABLE_DOMAIN_AGE_LOOKUP", "false").lower() == "true"
-ENABLE_WEB_SEARCH_VERIFICATION = os.getenv("ENABLE_WEB_SEARCH_VERIFICATION", "false").lower() == "true"
+ENABLE_WEB_SEARCH_VERIFICATION = os.getenv("ENABLE_WEB_SEARCH_VERIFICATION", "true").lower() == "true"
 MAX_SEARCH_ARTICLES_TO_FETCH = env_int("MAX_SEARCH_ARTICLES_TO_FETCH", 6, minimum=1)
 SEARCH_FETCH_WORKERS = env_int("SEARCH_FETCH_WORKERS", 4, minimum=1)
 
-_search_service = SearchService([DuckDuckGoSearchAdapter()])
+_search_service = build_default_search_service()
 CORS_ORIGINS = [
     x.strip()
     for x in os.getenv(
@@ -270,6 +270,7 @@ except OSError as exc:
 
 news_model: Any = None
 news_vectorizer: Any = None
+news_model_strip_cues: bool = False
 review_model: Any = None
 review_vectorizer: Any = None
 phishing_model: Any = None
@@ -466,6 +467,13 @@ def validate_public_url(url: str):
     if parsed.scheme.lower() not in {"http", "https"}:
         raise ValueError("Only HTTP and HTTPS URLs are supported.")
 
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing credentials are not supported.")
+    try:
+        if parsed.port not in (None, 80, 443):
+            raise ValueError("Only standard HTTP/HTTPS ports are supported.")
+    except ValueError:
+        raise ValueError("Only standard HTTP/HTTPS ports are supported.")
     hostname = (parsed.hostname or "").lower().rstrip(".")
     if not hostname:
         raise ValueError("The URL does not contain a hostname.")
@@ -489,6 +497,40 @@ def validate_public_url(url: str):
 
     if "." not in hostname and not ip:
         raise ValueError("A public domain name is required.")
+
+    # DNS rebinding guard: a public-looking hostname whose DNS answers
+    # point at a private/loopback/link-local/reserved address is an SSRF
+    # path (e.g. attacker-controlled DNS, or a domain like 127.0.0.1.nip.io).
+    # Literal-IP hostnames already returned above via the `ip` check, but
+    # getaddrinfo handles them too, so this is a single uniform gate.
+    # safe_fetch_html independently resolves/validates at connect time and
+    # pins the socket to the validated numeric address to close DNS TOCTOU.
+    import socket
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        raise ValueError("The hostname could not be resolved.")
+
+    resolved = {info[4][0] for info in addr_infos if info and info[4]}
+    if not resolved:
+        raise ValueError("The hostname could not be resolved.")
+
+    for ip_str in resolved:
+        try:
+            resolved_ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (
+            resolved_ip.is_private
+            or resolved_ip.is_loopback
+            or resolved_ip.is_link_local
+            or resolved_ip.is_reserved
+            or resolved_ip.is_multicast
+        ):
+            raise ValueError(
+                "The hostname resolves to a private/local address."
+            )
 
     return parsed
 
@@ -647,18 +689,9 @@ def pib_fact_check(headline: str, article_text: str) -> dict[str, Any]:
         # Fetch the PIB page so matching is not based only on its title.
         page_text = ""
         try:
-            response = requests.get(
-                url,
-                # Was hard-clamped to min(REQUEST_TIMEOUT, 8), which meant
-                # PIB page fetches routinely timed out on slower connections
-                # regardless of how generous REQUEST_TIMEOUT was configured.
-                # Now uses its own configurable budget.
-                timeout=PIB_PAGE_FETCH_TIMEOUT,
-                headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"},
-            )
-
+            response = safe_fetch_html(url, validate_public_url, timeout=PIB_PAGE_FETCH_TIMEOUT)
             if response.ok:
-                soup = BeautifulSoup(response.text, "html.parser")
+                soup = BeautifulSoup(response.html, "html.parser")
 
                 # Remove scripts/styles before extracting text.
                 for tag in soup(["script", "style", "noscript"]):
@@ -757,18 +790,44 @@ def pib_fact_check(headline: str, article_text: str) -> dict[str, Any]:
 
 
 def load_local_models():
-    global news_model, news_vectorizer
+    global news_model, news_vectorizer, news_model_strip_cues
     global review_model, review_vectorizer, phishing_model
 
-    news_model = load_joblib(MODELS_DIR / "news_model.joblib")
-    news_vectorizer = load_joblib(MODELS_DIR / "news_vectorizer.joblib")
+    # Prefer v2 artifacts trained on source-cue-stripped text (see
+    # models/news_model_v2_metadata.json); fall back to v1.
+    news_model = load_joblib(MODELS_DIR / "news_model_v2.joblib")
+    news_vectorizer = load_joblib(MODELS_DIR / "news_vectorizer_v2.joblib")
+    if news_model is not None and news_vectorizer is not None:
+        news_model_strip_cues = True
+        logger.info("[NEWS] using news_model_v2 (cue-stripped training)")
+    else:
+        news_model = load_joblib(MODELS_DIR / "news_model.joblib")
+        news_vectorizer = load_joblib(MODELS_DIR / "news_vectorizer.joblib")
 
-    review_model = load_joblib(MODELS_DIR / "review_model.joblib")
-    review_vectorizer = load_joblib(MODELS_DIR / "review_vectorizer.joblib")
+    # Prefer v2 artifacts trained on licensed corpora incl. modern-LLM
+    # fakes (see models/review_model_v2_metadata.json). The committed v1
+    # artifacts show no discrimination on their own training distribution
+    # under the runtime's scikit-learn version (documented in metadata).
+    review_model = load_joblib(MODELS_DIR / "review_model_v2.joblib")
+    review_vectorizer = load_joblib(MODELS_DIR / "review_vectorizer_v2.joblib")
+    if review_model is not None and review_vectorizer is not None:
+        logger.info("[REVIEW] using review_model_v2 (combined corpus)")
+    else:
+        review_model = load_joblib(MODELS_DIR / "review_model.joblib")
+        review_vectorizer = load_joblib(MODELS_DIR / "review_vectorizer.joblib")
 
+    # Prefer the v2 model trained on the PhiUSIIL dataset (235k labeled
+    # URLs, URL-only lexical features, parity-tested against the runtime
+    # feature map). Fall back to the earlier artifacts when absent.
     phishing_model = load_joblib(
-        MODELS_DIR / "local_phishing_model.joblib"
+        MODELS_DIR / "phishing_url_model_v2.joblib"
     )
+    if phishing_model is not None:
+        logger.info("[PHISHING] using phishing_url_model_v2 (PhiUSIIL-trained)")
+    if phishing_model is None:
+        phishing_model = load_joblib(
+            MODELS_DIR / "local_phishing_model.joblib"
+        )
     if phishing_model is None:
         phishing_model = load_joblib(
             MODELS_DIR / "phishing_model.joblib"
@@ -1348,9 +1407,28 @@ def safe_predict_text_model(
         logger.warning("[%s] %s failed: %s", task.upper(), name, exc)
         return None
 
+NEWS_CUE_PATTERNS = (
+    r"\b(reuters|associated press|ap|afp|bloomberg|uptodate|upi|pti|ians|ani)\b\s*[-\u2013\u2014):]",
+    r"^\s*[A-Z][A-Z\s,.']{2,30}\((?:reuters|ap|afp)\)",
+    r"\((?:reuters|ap|afp)\)",
+    r"\b(reuters|afp)\b",
+)
+
+
+def strip_source_cues(text: str) -> str:
+    """Remove wire-service name cues. MUST match the v2 training-time
+    stripping exactly (see models/news_model_v2_metadata.json)."""
+    t = str(text)
+    for pat in NEWS_CUE_PATTERNS:
+        t = re.sub(pat, " ", t, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def local_news_prediction(content: str):
     if news_model is None or news_vectorizer is None:
         return None
+    if news_model_strip_cues:
+        content = strip_source_cues(content)
     return safe_predict_text_model(
         news_model,
         news_vectorizer,
@@ -1595,7 +1673,12 @@ def phishing_prediction_for_model(
         return None
 
     try:
-        X = np.asarray([values], dtype=float)
+        feature_names = getattr(model, "feature_names_in_", None)
+        if feature_names is not None:
+            import pandas as pd
+            X = pd.DataFrame([values], columns=list(feature_names))
+        else:
+            X = np.asarray([values], dtype=float)
         raw, conf = predict_model(model, X)
         if raw is None:
             return None
@@ -1794,23 +1877,67 @@ def registry_result_to_poll_dict(result: Any) -> Optional[dict[str, Any]]:
 def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
     """Aggregate compatible predictions into an inspectable ensemble result.
 
-    A prediction contributes ``confidence * weight`` to its label.  This means
-    model confidence and explicit voter weights affect both the winner and the
-    reported confidence instead of being used only as a tie-breaker.
+    Aggregation is complement-aware soft voting: each voter contributes
+    ``confidence * weight`` to its own label and the remaining
+    ``(1 - confidence) * weight`` to the other labels under consideration.
+    The reported ``confidence`` is the winner's share of ALL probability
+    mass, so a lone 73%-confidence voter reports 73, not 100.
+
+    Distinct signals are reported separately and should not be conflated:
+      - ``confidence``: complement-aware share of total probability mass.
+      - ``voteRatioConfidence``: plain fraction of voters backing the winner.
+      - ``modelScoreConfidence``: weight-averaged raw confidence of the
+        models that backed the winner (ignores disagreement).
+      - ``weightedConfidence``: legacy directional-only share (winner score
+        over directional scores, complement mass excluded).
+
+    When evidence is weak the poll abstains instead of forcing a verdict:
+    ``abstain`` is true and ``abstainReasons`` explains why. ``winner`` is
+    still populated for transparency; consumers should prefer
+    ``verdictStatus``.
     """
+    abstain_threshold = float(os.getenv("ENSEMBLE_ABSTAIN_THRESHOLD", "0.55"))
     valid: list[dict[str, Any]] = []
+    topical_matches = 0
 
     for prediction in predictions or []:
         if not prediction:
             continue
         if prediction.get("status") != "participated":
             continue
+        # Topical cross-check entries are related-article search hits,
+        # not claim verification. They are NEVER counted as truth votes:
+        # excluded from the winner, the score, and the vote denominator.
+        # They still appear in the response's raw `models` list (tagged)
+        # so the UI can show them separately as related coverage.
+        if prediction.get("evidenceType") == "topical_match_not_entailment":
+            topical_matches += 1
+            continue
         label = prediction.get("label")
         if label in {None, "", "Unknown"}:
             continue
 
+        # Input contract: every prediction dict is produced by
+        # make_prediction(), which stores confidence as a 0-100 percentage
+        # or None. Convert strictly by that contract. This also fixes the
+        # previous clamp01() ambiguity where a 1% confidence (stored as
+        # 1.0) was read back as 100%.
+        raw_confidence = prediction.get("confidence")
+        if raw_confidence is None:
+            confidence = 0.5
+        else:
+            try:
+                conf_value = float(raw_confidence)
+            except (TypeError, ValueError):
+                logger.warning("[POLL] Ignoring malformed prediction: %r", prediction)
+                continue
+            if 0.0 <= conf_value <= 100.0:
+                confidence = conf_value / 100.0
+            else:
+                # Out-of-contract value; clamp defensively.
+                confidence = max(0.0, min(1.0, conf_value))
+
         try:
-            confidence = clamp01(prediction.get("confidence"), 0.5)
             weight = max(0.1, float(prediction.get("weight", 1.0)))
         except (TypeError, ValueError):
             logger.warning("[POLL] Ignoring malformed prediction: %r", prediction)
@@ -1819,6 +1946,7 @@ def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
         normalized = dict(prediction)
         normalized["confidence"] = round(confidence * 100, 2)
         normalized["weight"] = weight
+        normalized["_conf01"] = confidence
         valid.append(normalized)
 
     if not valid:
@@ -1832,26 +1960,51 @@ def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
             "confidence": 0,
             "voteRatioConfidence": 0,
             "weightedConfidence": 0,
+            "modelScoreConfidence": 0,
             "margin": 0,
             "runnerUp": None,
             "isUnanimous": False,
             "isTie": False,
+            "abstain": True,
+            "abstainReasons": (
+                ["no_participating_models", "only_topical_matches"]
+                if topical_matches
+                else ["no_participating_models"]
+            ),
+            "verdictStatus": "insufficient_evidence",
             "models": [],
             "task": task,
+            "topicalMatchCount": topical_matches,
         }
 
     votes = Counter(p["label"] for p in valid)
-    weighted: dict[str, float] = {}
+    labels_seen = list(dict.fromkeys(p["label"] for p in valid))
+
+    directional: dict[str, float] = {}
+    scores: dict[str, float] = {}
+    complement_mass = 0.0  # single-label case: mass for "any other label"
 
     for prediction in valid:
         label = prediction["label"]
-        confidence = clamp01(prediction.get("confidence"), 0.5)
-        weight = max(0.1, float(prediction.get("weight", 1.0)))
-        weighted[label] = weighted.get(label, 0.0) + confidence * weight
+        confidence = prediction["_conf01"]
+        weight = prediction["weight"]
+        directional[label] = directional.get(label, 0.0) + confidence * weight
+        scores[label] = scores.get(label, 0.0) + confidence * weight
+        others = [l for l in labels_seen if l != label]
+        if others:
+            spill = (1.0 - confidence) * weight / len(others)
+            for other_label in others:
+                scores[other_label] = scores.get(other_label, 0.0) + spill
+        else:
+            # Only one label under consideration: the complement mass says
+            # "some other outcome", and it must still count in the total.
+            complement_mass += (1.0 - confidence) * weight
 
-    # Weighted score is the primary decision signal.
+    total_score = sum(scores.values()) + complement_mass
+
+    # Complement mass is not a candidate: rank only real labels.
     ranked = sorted(
-        weighted.items(),
+        scores.items(),
         key=lambda item: (item[1], votes.get(item[0], 0)),
         reverse=True,
     )
@@ -1859,10 +2012,19 @@ def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
 
     winning_votes = votes[winner]
     vote_ratio_confidence = winning_votes / len(valid)
-    total_weighted = sum(weighted.values())
+    total_directional = sum(directional.values())
 
-    weighted_confidence = (
-        weighted[winner] / total_weighted if total_weighted > 0 else 0.0
+    confidence_share = scores[winner] / total_score if total_score > 0 else 0.0
+    directional_share = (
+        directional[winner] / total_directional if total_directional > 0 else 0.0
+    )
+
+    winner_voters = [p for p in valid if p["label"] == winner]
+    winner_weight_sum = sum(p["weight"] for p in winner_voters)
+    model_score_confidence = (
+        sum(p["_conf01"] * p["weight"] for p in winner_voters) / winner_weight_sum
+        if winner_weight_sum > 0
+        else 0.0
     )
 
     runner_up = None
@@ -1875,33 +2037,65 @@ def model_poll(predictions: list[dict[str, Any]], task: str) -> dict[str, Any]:
             "votes": runner_votes,
             "weightedScore": round(runner_score, 4),
             "weightedSharePercent": round(
-                (runner_score / total_weighted) * 100 if total_weighted else 0.0,
+                (runner_score / total_score) * 100 if total_score else 0.0,
                 2,
             ),
         }
         margin = winning_votes - runner_votes
 
     weighted_share_percent = {
-        label: round((score / total_weighted) * 100 if total_weighted else 0.0, 2)
-        for label, score in weighted.items()
+        label: round((score / total_score) * 100 if total_score else 0.0, 2)
+        for label, score in scores.items()
     }
+
+    is_tie = len(ranked) > 1 and ranked[0][1] == ranked[1][1]
+
+    abstain_reasons: list[str] = []
+    if is_tie:
+        abstain_reasons.append("tied_scores")
+    # Vote-count tie (e.g. 2 Real vs 2 Fake): equal numbers of models
+    # directly contradict each other, so the ensemble abstains. Model
+    # confidences are uncalibrated and come from different models, so a
+    # confidence gap (even 99% vs 51%) is not grounded proof that one
+    # side is right and cannot break a vote tie. The aggregate score is
+    # a heuristic, not a calibrated probability. The Artemis 2-2 case
+    # displayed "MOSTLY TRUE" before this rule; a vote tie must never
+    # be a truth verdict.
+    if len(ranked) > 1 and winning_votes == votes[ranked[1][0]]:
+        abstain_reasons.append("tied_votes")
+    if confidence_share < abstain_threshold:
+        abstain_reasons.append("low_confidence")
+    if task == "Fake News" and any(p.get("evidenceType") == "estimated_entailment" for p in valid) and not any(
+        p.get("evidenceType") != "estimated_entailment" and p.get("source") not in {"heuristic", "cross_check", "nli_evidence"}
+        for p in valid
+    ):
+        abstain_reasons.append("no_direct_claim_model")
+    abstain = bool(abstain_reasons)
+
+    for prediction in valid:
+        prediction.pop("_conf01", None)
 
     return {
         "winner": winner,
         "votes": dict(votes),
-        "weightedVotes": {label: round(score, 4) for label, score in weighted.items()},
+        "weightedVotes": {label: round(score, 4) for label, score in directional.items()},
         "weightedSharePercent": weighted_share_percent,
         "totalVotes": len(valid),
         "winningVotes": winning_votes,
-        "confidence": round(weighted_confidence * 100, 2),
+        "confidence": round(confidence_share * 100, 2),
         "voteRatioConfidence": round(vote_ratio_confidence * 100, 2),
-        "weightedConfidence": round(weighted_confidence * 100, 2),
+        "weightedConfidence": round(directional_share * 100, 2),
+        "modelScoreConfidence": round(model_score_confidence * 100, 2),
         "margin": margin,
         "runnerUp": runner_up,
         "isUnanimous": len(votes) == 1,
-        "isTie": len(ranked) > 1 and weighted[ranked[0][0]] == weighted[ranked[1][0]],
+        "isTie": is_tie or "tied_votes" in abstain_reasons,
+        "abstain": abstain,
+        "abstainReasons": abstain_reasons,
+        "verdictStatus": "uncertain" if abstain else "confident",
         "models": valid,
         "task": task,
+        "topicalMatchCount": topical_matches,
     }
 
 
@@ -2614,16 +2808,17 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
             else:
                 yield sse_event("model_unavailable", {"model": entry["name"]})
 
-        # Always-available zero-dependency stylometric voter, mirrored
-        # from analyze_news() so the live stream never has fewer voters
-        # than the non-streaming endpoint.
+        # Zero-dependency stylometric risk check, mirrored from
+        # analyze_news(). One-sided by design: it only ever flags clickbait
+        # style risk; when no markers fire it ABSTAINS, because absence of
+        # clickbait is not evidence a story is authentic.
         yield sse_event("model_started", {"model": "Heuristic Style Check"})
         heuristic_vote = heuristic_news_vote(headline, article_text, make_prediction)
         if heuristic_vote:
             predictions.append(heuristic_vote)
             yield sse_event("model_completed", {"model": "Heuristic Style Check", "label": heuristic_vote["label"], "confidence": heuristic_vote["confidence"]})
         else:
-            yield sse_event("model_unavailable", {"model": "Heuristic Style Check"})
+            yield sse_event("model_unavailable", {"model": "Heuristic Style Check", "reason": "No clickbait/style risk markers found; abstained (absence of markers is not evidence of authenticity)."})
 
         # URL Trust Analysis — same single-call logic as analyze_news().
         embedded_url_trust = check_article_url_trust(headline, article_text, article_url)
@@ -2658,45 +2853,15 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
         poll = model_poll(predictions, "Fake News")
         yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
 
-        # --- Search Coverage Trust (independent voter, live-poll enabled) --
-        # Only meaningful when the article/headline supplied no links of
-        # its own to check directly — mirrors analyze_news() exactly.
+        # Search coverage is context only, never a truth voter.
         search_url_trust = None
         if not embedded_url_trust["checked"]:
-            yield sse_event("model_started", {"model": "Search Coverage Trust"})
             try:
                 search_url_trust = search_based_url_trust(headline, article_text)
+                yield sse_event("coverage_context_completed", {"coverage": search_url_trust, "votes": False})
             except Exception as exc:
-                logger.warning("[STREAM] Search Coverage Trust failed: %s", exc)
+                logger.warning("[STREAM] coverage context failed: %s", exc)
                 search_url_trust = {"performed": False, "reason": str(exc)}
-
-        search_url_trust = None
-        if not embedded_url_trust["checked"]:
-            yield sse_event("model_started", {"model": "Search Coverage Trust"})
-            try:
-                search_url_trust = search_based_url_trust(headline, article_text)
-            except Exception as exc:
-                logger.warning("[STREAM] Search Coverage Trust failed: %s", exc)
-                search_url_trust = {"performed": False, "reason": str(exc)}
-
-            search_trust_vote = None
-            if search_url_trust.get("coverageFound"):
-                total = search_url_trust["totalChecked"]
-                trust_ratio = search_url_trust["trustedCount"] / total if total else 0
-                if total >= 3:
-                    if trust_ratio >= 0.6:
-                        search_trust_vote = make_prediction("Search Coverage Trust", "Real", trust_ratio, source="heuristic", weight=1.2)
-                    elif trust_ratio <= 0.35:
-                        search_trust_vote = make_prediction("Search Coverage Trust", "Fake", 1 - trust_ratio, source="heuristic", weight=1.2)
-            
-
-            if search_trust_vote:
-                predictions.append(search_trust_vote)
-                yield sse_event("model_completed", {"model": "Search Coverage Trust", "label": search_trust_vote["label"], "confidence": search_trust_vote["confidence"]})
-            else:
-                yield sse_event("model_unavailable", {"model": "Search Coverage Trust", "reason": search_url_trust.get("reason") if search_url_trust else "not applicable"})
-            poll = model_poll(predictions, "Fake News")
-            yield sse_event("vote_added", {"votes": poll["votes"], "winner": poll["winner"], "totalVotes": poll["totalVotes"]})
 
         # --- Gemini (independent voter) -------------------------------------
         yield sse_event("model_started", {"model": "Gemini + Google Search"})
@@ -2732,6 +2897,7 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
         # afterwards (as each future completes) so model objects are never
         # called concurrently from multiple threads.
         related_evidence = {"enabled": False, "articles": [], "clusters": [], "summary": None}
+        claim_verification = None
         if ENABLE_WEB_SEARCH_VERIFICATION and suggested_queries:
             yield sse_event("search_started", {"queries": suggested_queries})
             try:
@@ -2794,6 +2960,24 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
                         "id": article_id, "url": result.url,
                         "winner": article_poll["winner"], "agreement": entry["articleLabelAgreement"],
                     })
+                    # Claim-level entailment: does THIS source's text
+                    # support or refute the submitted claim? Local NLI
+                    # estimate - a source repeating a false claim still
+                    # counts as 'supports'; shown with its matched passage.
+                    try:
+                        from services.entailment_service import check_source
+
+                        claim_text = headline or re.split(r"(?<=[.!?])\s+", article_text or "", maxsplit=1)[0]
+                        entry["claimCheck"] = check_source(claim_text, entry["text"])
+                        if entry["claimCheck"].get("available"):
+                            yield sse_event("article_claim_checked", {
+                                "id": article_id, "url": result.url,
+                                "verdict": entry["claimCheck"]["verdict"],
+                                "matchedPassage": entry["claimCheck"].get("matchedPassage", "")[:200],
+                            })
+                    except Exception as exc:
+                        logger.warning("[STREAM] claim check failed for %s: %s", result.url, exc)
+                        entry["claimCheck"] = None
                     fetched.append(entry)
 
             yield sse_event("source_clustering_started", {})
@@ -2806,6 +2990,34 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
                 "enabled": True, "articlesFound": len(search_results), "articlesExtracted": len(fetched),
                 "articles": fetched, "clusters": [c.to_dict() for c in clusters], "summary": summary,
             }
+
+            # Aggregate the per-article claim checks into ensemble votes:
+            # one weak vote per deduplicated hostname/title/body, labelled
+            # estimated_entailment so they stay distinct from model votes.
+            try:
+                from services.entailment_service import (
+                    verification_to_predictions,
+                    verify_claim_against_articles,
+                )
+
+                claim_text = headline or re.split(r"(?<=[.!?])\s+", article_text or "", maxsplit=1)[0]
+                claim_verification = verify_claim_against_articles(claim_text, fetched)
+                nli_predictions = verification_to_predictions(claim_verification, make_prediction)
+                if nli_predictions:
+                    predictions.extend(nli_predictions)
+                    poll = model_poll(predictions, "Fake News")
+                    yield sse_event("vote_added", {
+                        "votes": poll["votes"], "winner": poll["winner"],
+                        "totalVotes": poll["totalVotes"],
+                    })
+                yield sse_event("claim_verification_completed", {
+                    "supports": claim_verification.get("supports", 0),
+                    "refutes": claim_verification.get("refutes", 0),
+                    "inconclusive": claim_verification.get("inconclusive", 0),
+                })
+            except Exception as exc:
+                logger.warning("[STREAM] claim verification aggregation failed: %s", exc)
+                claim_verification = None
         else:
             yield sse_event("search_skipped", {"reason": "ENABLE_WEB_SEARCH_VERIFICATION is false or no queries generated"})
 
@@ -2817,7 +3029,7 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
                 poll=poll,
                 temporal=temporal_assessment.to_dict() if temporal_assessment else None,
                 clickbait=structured_claim.clickbait if structured_claim else None,
-                gemini_available=gemini["available"],
+                gemini_available=(gemini.get("mode") == "gemini"),  # offline fallback is NOT web verification
             )
             yield sse_event("cross_evidence_completed", {
                 "classification": python_synthesis.classification, "confidence": python_synthesis.confidence,
@@ -2845,6 +3057,7 @@ def stream_news_analysis(headline: str, article_url: str, article_text: str, req
             "temporal": temporal_assessment.to_dict() if temporal_assessment else None,
             "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
             "relatedEvidence": related_evidence,
+            "claimVerification": claim_verification,
             
             "pibFactCheck": {
                 "available": pib.get("available", False),
@@ -2956,9 +3169,9 @@ def find_pib_posts(query: str, max_results: int = 6) -> list[dict[str, str]]:
 
 def fetch_page_title(url: str) -> str:
     try:
-        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"})
-        if r.ok:
-            soup = BeautifulSoup(r.text, "html.parser")
+        result = safe_fetch_html(url, validate_public_url, timeout=8, max_bytes=1024*1024)
+        if result.ok:
+            soup = BeautifulSoup(result.html, "html.parser")
             if soup.title:
                 return soup.title.get_text(" ", strip=True)
     except Exception:
@@ -3177,8 +3390,9 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
         pretrained_text_predictions("news", content)
     )
 
-    # Always-available zero-dependency stylometric voter -- keeps the
-    # ensemble multi-model even when Kaggle/BERTPhish/Gemini are all down.
+    # Zero-dependency stylometric risk check. One-sided: flags clickbait
+    # style risk, abstains otherwise (absence of markers is not evidence
+    # of authenticity, so it never casts a default "Real" vote).
     heuristic_vote = heuristic_news_vote(headline, article_text, make_prediction)
     if heuristic_vote:
         predictions.append(heuristic_vote)
@@ -3213,22 +3427,9 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
     search_url_trust = None
     if not embedded_url_trust["checked"]:
         search_url_trust = search_based_url_trust(headline, article_text)
-        if search_url_trust.get("coverageFound"):
-            total = search_url_trust["totalChecked"]
-            trust_ratio = search_url_trust["trustedCount"] / total if total else 0
-            
-            if total >= 3:
-                if trust_ratio >= 0.6:
-                    predictions.append(
-                        make_prediction("Search Coverage Trust", "Real",
-                                         trust_ratio, source="heuristic", weight=1.2)
-                    )
-                elif trust_ratio <= 0.35:
-                    predictions.append(
-                        make_prediction("Search Coverage Trust", "Fake",
-                                         1 - trust_ratio, source="heuristic", weight=1.2)
-                    )
-        
+        # Topical coverage/domain reputation is displayed as context only.
+        # It cannot establish support/refutation of the submitted claim and
+        # must never vote Real/Fake based on the number of search hits.
 
     # Gemini is an independent verification voter only when it actually
     # returns a classification. It does not receive fake confidence.
@@ -3254,15 +3455,40 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
     cross_check_weight = 0.6 if gemini["available"] else 1.0
 
     for vote in cross_check["crossCheckVotes"]:
-        predictions.append(
-            make_prediction(
-                f"Cross-check: {vote['sourceTitle'][:40]}",
-                vote["label"],
-                vote.get("confidence"),
-                source="cross_check",
-                weight=cross_check_weight,
-            )
+        cross_pred = make_prediction(
+            f"Cross-check: {vote['sourceTitle'][:40]}",
+            vote["label"],
+            vote.get("confidence"),
+            source="cross_check",
+            weight=cross_check_weight,
         )
+        # Related articles are found by topic search. A topical match is
+        # NOT claim-level verification; mark it so the poll, the UI and
+        # the synthesis can treat it accordingly.
+        cross_pred["evidenceType"] = "topical_match_not_entailment"
+        predictions.append(cross_pred)
+
+    # --- Claim-level entailment against fetched sources ------------------
+    # Unlike the topical cross-check above, this runs a local NLI model
+    # claim-vs-source-text and only sources with a clear estimated
+    # supports/refutes signal vote. One weak vote per deduplicated hostname/title/body.
+    # Still an ESTIMATE (see services/entailment_service.py docstring):
+    # a source repeating a false claim 'supports' it.
+    claim_verification = None
+    try:
+        from services.entailment_service import (
+            verification_to_predictions,
+            verify_claim_against_articles,
+        )
+
+        claim_text = headline or re.split(r"(?<=[.!?])\s+", article_text or "", maxsplit=1)[0]
+        claim_verification = verify_claim_against_articles(claim_text, related_articles)
+        predictions.extend(
+            verification_to_predictions(claim_verification, make_prediction)
+        )
+    except Exception as exc:
+        logger.warning("[NLI] claim verification failed, continuing without it: %s", exc)
+
     poll = model_poll(predictions, "Fake News")
     winner = poll["winner"]
 
@@ -3289,7 +3515,7 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
             poll=poll,
             temporal=temporal_assessment.to_dict() if temporal_assessment else None,
             clickbait=structured_claim.clickbait if structured_claim else None,
-            gemini_available=gemini["available"],
+            gemini_available=(gemini.get("mode") == "gemini"),  # offline fallback is NOT web verification
         )
     except Exception as exc:
         logger.warning("[SYNTHESIS] failed, continuing without it: %s", exc)
@@ -3307,13 +3533,27 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
             "totalModels": poll["totalVotes"],
             "participatingModels": [
                 p["model"] for p in predictions
+                if p.get("evidenceType") != "topical_match_not_entailment"
             ],
         },
         "explanation": (
-            f"{poll['winningVotes']} of {poll['totalVotes']} "
-            f"participating voters selected {winner}."
+            f"{poll['winningVotes']} of {poll['totalVotes']} model voters selected {winner}"
+            + (
+                f" ({poll.get('topicalMatchCount', 0)} topical search match(es) "
+                "shown separately as related coverage, not counted as votes)."
+                if poll.get("topicalMatchCount")
+                else "."
+            )
             if winner != "Unknown"
-            else "No model produced a usable result."
+            else (
+                "No model produced a usable result"
+                + (
+                    f" ({poll.get('topicalMatchCount', 0)} topical search match(es) "
+                    "found but not counted as verification)."
+                    if poll.get("topicalMatchCount")
+                    else "."
+                )
+            )
         ),
         "poll": poll,
         "models": predictions,
@@ -3349,8 +3589,23 @@ def analyze_news(payload: NewsPayload, x_gemini_api_key: Optional[str] = Header(
         "suggestedSearchQueries": suggested_queries,
         "pythonSynthesis": python_synthesis.to_dict() if python_synthesis else None,
         "relatedEvidence": related_evidence,
+        "claimVerification": claim_verification,
         
     }
+
+# The review model measures writing origin (AI-generated vs human-written),
+# NOT truthfulness. API keeps legacy labels ("Genuine"/"Fake") for backward
+# compatibility, but every response also carries explicit normalized display
+# semantics so no consumer has to guess what the label means.
+REVIEW_DISPLAY_LABELS = {
+    "Genuine": "Likely Human-Written",
+    "Fake": "Likely AI-Generated",
+}
+
+
+def review_display_label(label):
+    return REVIEW_DISPLAY_LABELS.get(label, label)
+
 
 @app.post("/analyze/review")
 def analyze_review(payload: TextPayload):
@@ -3367,6 +3622,9 @@ def analyze_review(payload: TextPayload):
     poll = model_poll(predictions, "Fake Review")
     winner = poll["winner"]
     badge = "success" if winner == "Genuine" else "danger" if winner == "Fake" else "warning"
+    for p in predictions:
+        if isinstance(p, dict) and p.get("label"):
+            p["labelDisplay"] = review_display_label(p["label"])
     fake_votes = poll["votes"].get("Fake", 0)
     spam_score = fake_votes / poll["totalVotes"] * 100 if poll["totalVotes"] else 0
 
@@ -3436,8 +3694,19 @@ def analyze_review(payload: TextPayload):
     return {
         "success": True,
         "label": winner,
+        "labelDisplay": review_display_label(winner) if winner != "Unknown" else winner,
         "confidence": poll["confidence"],
         "badgeClass": badge,
+        "taskSemantics": {
+            "measures": "ai_generated_vs_human_written",
+            "doesNotMeasure": "truthfulness_or_deception",
+            "caveat": (
+                "The review model detects whether text reads as AI-generated "
+                "versus human-written. It cannot tell whether a review is "
+                "truthful, deceptive, or paid-for. 'Fake' here means "
+                "'likely machine-written', not 'likely dishonest'."
+            ),
+        },
         "metrics": {
             "spamScore": round(spam_score, 1),
             "modelVotes": poll["votes"],
@@ -3446,7 +3715,9 @@ def analyze_review(payload: TextPayload):
             "participatingModels": [p["model"] for p in predictions],
         },
         "explanation": (
-            f"{poll['winningVotes']} of {poll['totalVotes']} participating review voters selected {winner}."
+            f"{poll['winningVotes']} of {poll['totalVotes']} review model voters estimate "
+            f"'{review_display_label(winner)}' (writing-origin estimate, not a "
+            "truthfulness or deception check)."
             if winner != "Unknown"
             else "No compatible review model produced a result."
         ),
@@ -3498,12 +3769,14 @@ def analyze_review_page(payload: ReviewPagePayload):
                 else "Normal distribution"
             )
 
+    # Writing-origin estimates, not fraud verdicts: the model detects
+    # AI-generated vs human-written text, not deception.
     verdict = (
         "Insufficient Review Data"
         if not results
-        else "Likely Fake Reviews Present"
+        else "AI-Generated Writing Common"
         if fake_ratio > 0.4
-        else "Reviews Look Genuine"
+        else "Mostly Human-Written"
     )
 
     return {
@@ -3513,6 +3786,10 @@ def analyze_review_page(payload: ReviewPagePayload):
         "fakeReviewRatio": round(fake_ratio * 100, 1),
         "ratingPatternAssessment": rating_skew,
         "verdict": verdict,
+        "taskSemantics": {
+            "measures": "ai_generated_vs_human_written",
+            "doesNotMeasure": "truthfulness_or_deception",
+        },
         "details": results,
     }
 
@@ -3765,9 +4042,19 @@ def model_status():
     if bertphish_model is not None:
         active["phishing"].append("BERTPhish")
 
-    active["news"].append("Heuristic Style Check")
-    active["review"].append("Heuristic Spam Pattern")
-    active["phishing"].append("Standard Checklist (typosquat/redirects/SSL/TLD)")
+    # Risk flag only: fires on clickbait/style markers, otherwise abstains
+    # (absence of markers is not treated as evidence of authenticity).
+    # Always wired into both news paths, so always listed as active.
+    active["news"].append("Heuristic Style Check (risk flags only)")
+
+    for entry in hf_news_classifiers:
+        active["news"].append(entry["name"])
+
+    # Review analysis intentionally uses ONLY the local + pretrained
+    # review voters. The "Heuristic Spam Pattern" helper exists in
+    # trust_extras but is not wired into analyze_review, so it must not
+    # be listed as active here.
+    active["phishing"].append("Standard Checklist (typosquat/TLD; no redirect-following, certificate not checked)")
 
     return {
         "active": active,
@@ -3811,4 +4098,4 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         reload=RELOAD,
-    )
+        )
