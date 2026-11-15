@@ -52,4 +52,4 @@ Publication checks on November 15: poll regressions 13/13, gateway tests 5/5 and
 
 `Dockerfile` and `deploy/start.sh` are preparation only; a container deployment has not been verified. Production requires a private JWT secret, abuse controls, dependency updates and deployment testing. `PUBLIC_DEMO` disables accounts/history for ephemeral hosting. Local mode uses SQLite.
 
-A fresh npm audit on November 15 reported server advisories including critical `proxy-addr` and high `body-parser`, plus frontend/tooling advisories including high Vite. Dependencies need review and regression testing before internet-facing deployment. Do not treat this demo as production-ready.
+Compatible lockfile updates were checked on November 15: server production audit reports 0 advisories; 2 moderate development-only advisories remain in the nodemon chain. Client audit reports 0. Gateway regressions and frontend build pass after the updates. A complete live news-flow retest after these dependency updates is still outstanding. Deployment testing and abuse controls remain required; do not treat this demo as production-ready.
