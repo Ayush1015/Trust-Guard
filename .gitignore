@@ -64,3 +64,11 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# Runtime data and local publication artifacts
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+TrustGuard/ml-service/cleaned_data/
+TrustGuard/ml-service/models/nli/
+TrustGuard/ml-service/datasets/
