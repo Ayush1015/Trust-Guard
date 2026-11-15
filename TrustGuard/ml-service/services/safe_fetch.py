@@ -12,11 +12,14 @@ hop is re-validated here before being followed, up to MAX_REDIRECTS.
 
 from __future__ import annotations
 
+import ipaddress
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urljoin
 
 import requests
+from services.public_transport import public_session
 
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -47,13 +50,45 @@ _HEADERS = {
 }
 
 
+def _is_disallowed_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+    )
+
+
+def _connected_peer_ip(response: requests.Response) -> Optional[str]:
+    """Best-effort read of the actual TCP peer for a streamed response.
+    Returns None when the socket is not introspectable (caller then relies
+    on the pre-connect DNS validation, which still applies on every hop)."""
+    try:
+        connection = getattr(response.raw, "connection", None)
+        sock = getattr(connection, "sock", None)
+        if sock is None:
+            return None
+        peer = sock.getpeername()
+        return peer[0] if peer else None
+    except Exception:
+        return None
+
+
 def _read_capped(response: requests.Response, max_bytes: int) -> Optional[bytes]:
     """Reads the response body up to max_bytes. Returns None if the body
     exceeds the cap, so callers can reject oversized pages instead of
     buffering an attacker-controlled amount of memory."""
     chunks = []
     total = 0
+    deadline = time.monotonic() + 30
     for chunk in response.iter_content(chunk_size=65536):
+        if time.monotonic() > deadline:
+            raise requests.exceptions.Timeout("Response body deadline exceeded")
         total += len(chunk)
         if total > max_bytes:
             return None
@@ -81,13 +116,15 @@ def safe_fetch_html(
             )
 
         try:
-            response = requests.get(
+            response = public_session().get(
                 current_url,
                 timeout=timeout,
                 headers=_HEADERS,
                 allow_redirects=False,  # we validate + follow manually
                 stream=True,
             )
+        except ValueError as exc:
+            return FetchResult(ok=False, final_url=current_url, error="ssrf_blocked", error_message=str(exc))
         except requests.exceptions.Timeout:
             return FetchResult(
                 ok=False, final_url=current_url, error="timeout",
@@ -102,6 +139,19 @@ def safe_fetch_html(
             return FetchResult(
                 ok=False, final_url=current_url, error="fetch_failed",
                 error_message=str(exc),
+            )
+
+        # Post-connect peer check: validate_public_url resolves DNS before
+        # connecting, but DNS answers can change between that check and the
+        # actual TCP connection (rebinding TOCTOU). Inspect the address we
+        # actually connected to; a private/loopback peer means the page is
+        # not a public website regardless of what the URL claimed.
+        peer_ip = _connected_peer_ip(response)
+        if peer_ip is not None and _is_disallowed_ip(peer_ip):
+            response.close()
+            return FetchResult(
+                ok=False, final_url=current_url, error="ssrf_blocked",
+                error_message="The server resolved to a private/local address.",
             )
 
         # Redirect: re-validate the *destination* before following it.

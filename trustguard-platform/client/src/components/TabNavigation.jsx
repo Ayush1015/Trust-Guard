@@ -2,7 +2,7 @@
 export default function TabNavigation({ activeTab, setActiveTab }) {
   const tabs = [
     { id: 'news', label: '📰 Fake News Detector' },
-    { id: 'review', label: '⭐ Fake Review Detector' },
+    { id: 'review', label: '⭐ Review Writing Origin' },
     { id: 'phishing', label: '🔗 Phishing URL Checker' }
   ];
 

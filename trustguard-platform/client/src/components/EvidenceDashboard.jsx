@@ -201,11 +201,12 @@ function SynthesisCard({ synthesis }) {
   );
 }
 
-// §27 RELATED ARTICLES + §11 SOURCE CLUSTERS. Note the wording here is
-// deliberately "same label as this analysis" / "different label" —
-// NOT "supports" / "contradicts". See the articleLabelAgreement
-// comment in main.py: real semantic entailment isn't built yet, and
-// mislabeling this would overstate what the system actually checked.
+// §27 RELATED ARTICLES + §11 SOURCE CLUSTERS. The agreement badge is
+// deliberately "same label as this analysis" / "different label": it
+// comes from running the local ML model on the related article, which
+// is topical agreement, not verification. Claim-level source checks
+// (estimated support/refute) are shown separately by
+// ClaimVerificationPanel and the per-article claimCheck badge.
 const AGREEMENT_LABEL = {
   MATCHES_PRIMARY: 'Same label as this analysis',
   DIFFERS_FROM_PRIMARY: 'Different label from this analysis',
@@ -217,6 +218,78 @@ const AGREEMENT_TONE = {
   DIFFERS_FROM_PRIMARY: 'warning',
   INSUFFICIENT: 'neutral',
 };
+
+// Claim-level source check: local NLI model compared the claim text
+// against each source's text. Wording stays "estimated" throughout:
+// a source repeating a false claim still reads as 'supports'.
+const CLAIMCHECK_LABEL = {
+  supports: 'Estimated: supports the claim',
+  refutes: 'Estimated: refutes the claim',
+  inconclusive: 'Inconclusive',
+};
+
+const CLAIMCHECK_TONE = {
+  supports: 'success',
+  refutes: 'danger',
+  inconclusive: 'neutral',
+};
+
+function ClaimVerificationPanel({ verification }) {
+  if (!verification || verification.available === false) return null;
+  const sources = verification.sources || [];
+  if (sources.length === 0) return null;
+
+  return (
+    <Panel title="Source Check (Estimated)" icon="bi-check2-square">
+      <p className="small mb-3" style={{ color: 'var(--text-muted)' }}>
+        <i className="bi bi-info-circle me-1" />
+        A local language model compared the claim against each source's text,
+        sentence by sentence. This is a text-comparison estimate, not
+        independent fact verification: a source that repeats a false claim
+        still counts as "supports".
+      </p>
+      <div className="d-flex flex-wrap gap-3 mb-3 pb-3" style={{ borderBottom: '1px solid var(--border-color)' }}>
+        <StatBlock label="Estimated support" value={verification.supports ?? 0} />
+        <StatBlock label="Estimated refute" value={verification.refutes ?? 0} />
+        <StatBlock label="Inconclusive" value={verification.inconclusive ?? 0} />
+      </div>
+      <div className="d-flex flex-column gap-2">
+        {sources.map((s, i) => (
+          <div
+            key={`${s.url}-${i}`}
+            className="p-3 rounded"
+            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-color)' }}
+          >
+            <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-1">
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="small text-decoration-none text-truncate"
+                style={{ color: 'var(--text-secondary)', maxWidth: '60%' }}
+              >
+                {s.title || s.domain}
+              </a>
+              <div className="d-flex align-items-center gap-2">
+                {s.publishedAt && (
+                  <span className="small" style={{ color: 'var(--text-muted)' }}>{s.publishedAt}</span>
+                )}
+                <Badge tone={CLAIMCHECK_TONE[s.verdict] || 'neutral'}>
+                  {CLAIMCHECK_LABEL[s.verdict] || s.verdict}
+                </Badge>
+              </div>
+            </div>
+            {s.matchedPassage && (
+              <p className="small mb-0" style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                "{s.matchedPassage.length > 220 ? `${s.matchedPassage.slice(0, 220)}…` : s.matchedPassage}"
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
 
 function RelatedEvidencePanel({ evidence }) {
   if (!evidence) return null;
@@ -248,11 +321,16 @@ function RelatedEvidencePanel({ evidence }) {
 
   return (
     <Panel title="Related Coverage" icon="bi-globe2">
+      <p className="small mb-3" style={{ color: 'var(--text-muted)' }}>
+        <i className="bi bi-info-circle me-1" />
+        These articles were found by topic search. They are related coverage,
+        not independent verification that this specific claim is true or false. Similar titles are grouped heuristically; different hostnames do not prove separate ownership or editorial independence.
+      </p>
       {summary && (
         <div className="d-flex flex-wrap gap-3 mb-3 pb-3" style={{ borderBottom: '1px solid var(--border-color)' }}>
           <StatBlock label="Articles found" value={evidence.articlesFound ?? articles.length} />
           <StatBlock label="Successfully analyzed" value={evidence.articlesExtracted ?? articles.length} />
-          <StatBlock label="Independent source clusters" value={summary.independentClusters} highlight />
+          <StatBlock label="Coverage groups (heuristic)" value={summary.coverageGroups ?? summary.independentClusters} highlight />
         </div>
       )}
 
@@ -277,7 +355,7 @@ function RelatedEvidencePanel({ evidence }) {
                   {cluster.representativeTitle || 'Untitled cluster'}
                 </span>
                 <Badge tone={cluster.domainCount > 1 ? 'info' : 'neutral'}>
-                  {cluster.domainCount} independent domain{cluster.domainCount === 1 ? '' : 's'}
+                  {cluster.domainCount} hostname{cluster.domainCount === 1 ? '' : 's'}
                 </Badge>
               </div>
 
@@ -292,12 +370,19 @@ function RelatedEvidencePanel({ evidence }) {
                     style={{ color: 'var(--text-secondary)' }}
                   >
                     <span className="text-truncate">{article.domain}</span>
-                    {article.articleLabelAgreement && (
-                      <Badge tone={AGREEMENT_TONE[article.articleLabelAgreement] || 'neutral'}>
+                    <span className="d-flex align-items-center gap-2">
+                      {article.claimCheck?.available && article.claimCheck.verdict !== 'inconclusive' && (
+                        <Badge tone={CLAIMCHECK_TONE[article.claimCheck.verdict] || 'neutral'}>
+                          {CLAIMCHECK_LABEL[article.claimCheck.verdict]}
+                        </Badge>
+                      )}
+                      {article.articleLabelAgreement && (
+                        <Badge tone={AGREEMENT_TONE[article.articleLabelAgreement] || 'neutral'}>
 
-                        {AGREEMENT_LABEL[article.articleLabelAgreement] || article.articleLabelAgreement}
-                      </Badge>
-                    )}
+                          {AGREEMENT_LABEL[article.articleLabelAgreement] || article.articleLabelAgreement}
+                        </Badge>
+                      )}
+                    </span>
                   </a>
                 ))}
               </div>
@@ -323,10 +408,10 @@ function StatBlock({ label, value, highlight = false }) {
 export default function EvidenceDashboard({ result }) {
   if (!result) return null;
 
-  const { claim, temporal, pythonSynthesis, relatedEvidence } = result;
+  const { claim, temporal, pythonSynthesis, relatedEvidence, claimVerification } = result;
 
   // Nothing to show at all — e.g. a Node gateway still on Phase I.
-  if (!claim && !temporal && !pythonSynthesis && !relatedEvidence) return null;
+  if (!claim && !temporal && !pythonSynthesis && !relatedEvidence && !claimVerification) return null;
 
 
   return (
@@ -340,6 +425,7 @@ export default function EvidenceDashboard({ result }) {
           <TemporalCard temporal={temporal} />
         </div>
       </div>
+      <ClaimVerificationPanel verification={claimVerification} />
       <RelatedEvidencePanel evidence={relatedEvidence} />
     </div>
   );

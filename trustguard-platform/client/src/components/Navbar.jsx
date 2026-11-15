@@ -51,7 +51,9 @@ export default function Navbar({
             <span className="theme-toggle-knob">{theme === 'dark' ? '🌙' : '☀️'}</span>
           </button>
 
-          {isAuthenticated ? (
+          {import.meta.env.VITE_PUBLIC_DEMO === 'true' ? (
+            <span className="small">Public demo - no saved accounts/history</span>
+          ) : isAuthenticated ? (
             <div className="d-flex align-items-center gap-2">
               <div
                 className="d-none d-sm-flex align-items-center justify-content-center rounded-circle fw-bold"

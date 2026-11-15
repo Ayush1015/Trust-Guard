@@ -32,6 +32,9 @@ _SPACY_MODEL = "en_core_web_sm"
 def _try_load_spacy():
 
     global _NLP
+    import os
+    if os.getenv("ENABLE_SPACY_NER", "true").lower() != "true":
+        return None
     try:
         import spacy
         _NLP = spacy.load(_SPACY_MODEL)
@@ -81,6 +84,7 @@ _DATE_RE = re.compile(
     r"\b(?:\d{1,2}\s)?(?:January|February|March|April|May|June|July|"
     r"August|September|October|November|December)(?:\s\d{1,2})?,?\s\d{4}\b"
     r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b(?:19|20)\d{2}\b"  # bare year, e.g. "scheduled for 2026"
     r"|\b(?:today|yesterday|this week|last week|this year|recently)\b",
     re.I,
 )

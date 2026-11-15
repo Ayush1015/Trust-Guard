@@ -1,0 +1,83 @@
+TrustGuard website + Chrome companion - 15 November 2026
+========================================================
+This package runs locally. It is NOT a public deployment or Chrome Web
+Store listing. Read README.md for test scope and open limits.
+
+Requirements: Python 3.10/3.11, Node.js 22.12+ (uses native node:sqlite), npm.
+The separately supplied local demo joblib models were tested with scikit-learn 1.7.2. Do not load
+untrusted pickle/joblib model files. Run commands from extracted source.
+
+1. Python service (Linux/macOS)
+   cd TrustGuard/ml-service
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   .venv/bin/pip install scikit-learn==1.7.2
+   .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+   Windows: use py -m venv .venv, then .venv\Scripts\python.exe -m pip ...
+   and .venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+   For a lean local run, set ENABLE_HF_NEWS_MODELS=false and
+   ENABLE_SPACY_NER=false before starting. This keeps local classifiers and
+   ONNX source stance only if its separate files are installed; omits optional transformer news voters and
+   uses regex entity extraction. It is a reduced model profile, not an
+   equivalent accuracy claim. Optional models download on first startup.
+
+2. Gateway (a second terminal)
+   cd trustguard-platform/server
+   npm ci
+   Set PYTHON_ML_SERVICE_URL=http://127.0.0.1:8000
+   Set JWT_SECRET to a long random local value (not a shared repository value).
+   npm start
+   Default gateway: http://localhost:5000
+   Production mode refuses to start when JWT_SECRET is absent. Development
+   has a warning-only fallback for convenience, not for deployment.
+
+3. Website (a third terminal)
+   cd trustguard-platform/client
+   npm ci
+   npm run dev
+   Open http://localhost:5173
+
+4. Chrome companion
+   Open chrome://extensions, turn on Developer mode, Load unpacked, select
+   trustguard-extension/. Visit a normal page, then click its icon or press
+   Alt+Shift+G. Backend defaults to http://localhost:5000/api/v1.
+   On-demand only. Read page/selection into preview, edit, then choose check.
+   No background browsing capture. See extension README for data handling.
+
+Tests (from TrustGuard/ml-service, with the venv active)
+   python training/test_model_poll.py
+   python training/test_nli_entailment.py
+   python training/test_entailment_and_ssrf.py
+   python training/test_url_transport.py
+Gateway: cd trustguard-platform/server && npm test
+Frontend build: cd trustguard-platform/client && npm run build
+
+Model/source limits
+- News: estimated source support/refute/inconclusive with passages. This is
+  language-model stance, not independent truth proof. Repeated false claims
+  can look supported. Sources/rate limits change; no results is not proof.
+- Reviews: writing-origin estimate, NOT fraud/deception/authenticity.
+- URLs: structural risk, NOT a safety guarantee or malware scan. Redirect
+  inspection is unavailable rather than perform unguarded redirect fetches.
+- Scores are model/ensemble scores, not calibrated correctness probabilities.
+- User accounts/history work locally in SQLite; runtime databases are omitted
+  from this source update. Prepared PUBLIC_DEMO mode disables auth/history because
+  temporary hosted storage must not accept real accounts.
+
+Optional keyed search: TAVILY_API_KEY, stored outside source control. Do not
+put keys in frontend code or extension files. Free account setup/key is not
+completed in this package. No paid plan is required by the local app.
+
+The Dockerfile/deploy folder is unverified deployment preparation. No public
+website or store listing is supplied by this repository. See README.md for
+known dependency advisories before any internet-facing deployment.
+
+SOURCE-ONLY MODEL CAVEAT
+New v2 models and the NLI ONNX/tokenizer files are not committed. The
+separate local demo bundle includes them; a fresh clone falls back to
+pre-existing artifacts and disables missing NLI. Use training/bootstrap_nli.py for hash-checked NLI files and
+training/fetch_datasets.py for review/phishing datasets. Train separately;
+news data still requires checked permission. TG_* variables override paths.
+See MODEL_NOTES.md before downloading or redistributing model/data files.

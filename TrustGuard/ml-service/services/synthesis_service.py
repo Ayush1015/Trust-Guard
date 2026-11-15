@@ -37,11 +37,14 @@ CLICKBAIT_HIGH_THRESHOLD = 60
 
 @dataclass
 class SynthesisResult:
+    # NOTE: positional construction order is (classification, confidence,
+    # reasoning, caveats, basis) - every call site in this file uses it.
     classification: str
     confidence: float  # 0-100
-    basis: str  # "python_only" | "python_plus_gemini"
     reasoning: list[str] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
+    basis: str = "python_only"  # "python_only" | "python_plus_gemini"
+
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +80,9 @@ def synthesize(
     clickbait_score = (clickbait or {}).get("score", 0)
 
     basis = "python_plus_gemini" if gemini_available else "python_only"
+    # gemini_available must mean Gemini web verification ACTUALLY ran
+    # (callers pass mode == "gemini"). The offline fallback is not web
+    # verification and must not be labelled as one.
     if not gemini_available:
         caveats.append(
             "Independent web verification (Gemini) was unavailable for this "
@@ -87,7 +93,38 @@ def synthesize(
     # --- 1. No usable votes at all ------------------------------------
     if total_votes == 0:
         reasoning.append("No model produced a usable prediction for this content.")
+        if poll.get("topicalMatchCount"):
+            reasoning.append(
+                "Related articles matched this topic in search, but topical "
+                "matches are not verification and are not counted as votes."
+            )
         return SynthesisResult("INSUFFICIENT EVIDENCE", 0.0, reasoning, caveats, basis)
+
+    # --- 1a. Topical cross-checks are not claim verification ------------
+    model_sources = {m.get("source") for m in (poll.get("models") or []) if isinstance(m, dict)}
+    if "cross_check" in model_sources:
+        caveats.append(
+            "Related-article cross-checks are topical matches found by "
+            "search, not independent verification that this specific "
+            "claim is true or false."
+        )
+
+    # --- 1b. Ensemble abstained: keep the uncertainty explicit ---------
+    if poll.get("abstain"):
+        reasons = poll.get("abstainReasons") or []
+        if "tied_scores" in reasons or "tied_votes" in reasons:
+            reasoning.append("Model votes were split with no clear majority (tie) - no verdict either way.")
+        if "low_confidence" in reasons:
+            reasoning.append(
+                "The combined model evidence is weak (heuristic aggregate "
+                "below the abstention threshold)."
+            )
+        caveats.append(
+            "This is an inconclusive result. The ensemble's confidence is a "
+            "heuristic aggregate of model scores, not a calibrated "
+            "probability of correctness."
+        )
+        return SynthesisResult("INSUFFICIENT EVIDENCE", min(vote_confidence, 50.0), reasoning, caveats, basis)
 
     # --- 2. Temporal red flag: stale content presented as current -----
     if temporal_status in _STALE_TEMPORAL_STATUSES:

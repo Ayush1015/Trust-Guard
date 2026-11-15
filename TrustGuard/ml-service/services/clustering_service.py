@@ -13,14 +13,22 @@ gets this backwards. The point of clustering is catching "10 sites
 copying Reuters" — which by definition spans MULTIPLE domains. Domain
 is used here only as a tie-breaker (two articles from the same domain
 are never merged into each other, since a single outlet publishing two
-related-but-distinct stories should not collapse into one "independent
-source").
+related-but-distinct stories should not collapse into one coverage
+group).
 
 LIMITATION: Jaccard-over-titles catches syndicated/copied headlines
 well. It will NOT catch two independently-written articles about the
 same event with very differently worded headlines — that needs
 semantic similarity (embeddings), which is a real upgrade path if
 this proves too conservative in practice.
+
+TERMINOLOGY: a "cluster" here is a COVERAGE GROUP, not proof of
+editorial independence. Articles that share a hostname (after
+www-normalization), a near-identical title, or a copied body are
+grouped because they are probably the same wire copy — but nothing
+here verifies ownership, editorial control, or that two groups are
+truly independent of each other. Coverage size must never be used
+as a vote on whether a claim is true.
 """
 
 from __future__ import annotations
@@ -61,10 +69,11 @@ class SourceCluster:
 
     @property
     def is_independent_confirmation(self) -> bool:
-        """A cluster only counts as one independent confirmation
-        regardless of how many articles are inside it — this is the
-        exact mechanism that stops 10 Reuters-copies from outvoting
-        one lone dissenting source."""
+        """DEPRECATED, unused, and kept only so older callers don't
+        crash. The name overclaims: clustering groups likely-copied
+        coverage; it does NOT verify that any article is an
+        independent editorial confirmation. Do not use this for new
+        code — treat every cluster as one coverage group (heuristic)."""
         return True
 
     def to_dict(self) -> dict:
@@ -203,12 +212,17 @@ def cluster_articles(
 
 
 def independence_summary(clusters: list[SourceCluster]) -> dict:
-    """§11's headline stat: 'Articles found: 12 / Independent source
-    clusters: 4' — this is the number that must be used for evidence
-    strength, never the raw article count."""
+    """§11's headline stat, returned under the legacy key
+    `independentClusters` for API compatibility. Despite the key name,
+    the count is COVERAGE GROUPS (heuristic): likely-copied/syndicated
+    articles grouped together. It is NOT a count of verified
+    independent editorial sources, and it must never be used as a
+    truth vote. `coverageGroups` carries the same number under an
+    honest name."""
     total_articles = sum(len(c.article_ids) for c in clusters)
     return {
         "totalArticles": total_articles,
-        "independentClusters": len(clusters),
+        "independentClusters": len(clusters),  # legacy key: actually coverage groups (heuristic)
+        "coverageGroups": len(clusters),
         "largestClusterSize": max((len(c.article_ids) for c in clusters), default=0),
     }

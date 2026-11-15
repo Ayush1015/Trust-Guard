@@ -1,0 +1,11 @@
+**/node_modules
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/__pycache__
+**/.git
+**/cleaned_data
+**/training
+**/trustguard-extension
+*.zip

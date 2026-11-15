@@ -66,7 +66,11 @@ def heuristic_news_vote(headline: str, article_text: str, make_prediction):
 
     if red_flags >= 2:
         return make_prediction("Heuristic Style Check", "Fake", 0.55, source="heuristic", weight=0.5)
-    return make_prediction("Heuristic Style Check", "Real", 0.55, source="heuristic", weight=0.5)
+    # ABSTAIN by design: the ABSENCE of clickbait markers is not evidence
+    # that a story is authentic. Returning a default "Real" vote here used
+    # to silently dilute every ensemble toward Real. Like URL Trust
+    # Analysis, this check is one-sided: it only ever flags risk.
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -113,41 +117,41 @@ POPULAR_DOMAINS = (
 
 
 def typosquat_check(hostname: str) -> Optional[str]:
-    """Returns the popular domain this hostname closely resembles, or None."""
+    """Conservative one-edit brand-label check, not suffix-driven similarity.
+
+    Comparing whole domains inflated similarity through '.com' and flagged
+    example.com as apple.com. Compare labels instead, allow true subdomains
+    of the brand, and require at most one insertion/deletion/substitution or
+    adjacent transposition. This is a weak signal, not a phishing verdict.
+    """
+    hostname = (hostname or '').lower().rstrip('.')
     if not hostname:
         return None
-    if hostname in POPULAR_DOMAINS:
-        return None  # exact match is the real thing, not a typosquat
-    best_match, best_ratio = None, 0.0
     for domain in POPULAR_DOMAINS:
-        ratio = difflib.SequenceMatcher(None, hostname, domain).ratio()
-        if ratio > best_ratio:
-            best_ratio, best_match = ratio, domain
-    # Similar enough to be confusing, but not identical.
-    if 0.75 <= best_ratio < 1.0:
-        return best_match
+        if hostname == domain or hostname.endswith('.' + domain):
+            return None
+    label = hostname.split('.')[-2] if '.' in hostname else hostname
+    def one_edit(a, b):
+        if a == b or abs(len(a)-len(b)) > 1:
+            return False
+        if len(a) == len(b):
+            diffs = [i for i, (x,y) in enumerate(zip(a,b)) if x != y]
+            return len(diffs) == 1 or (len(diffs) == 2 and diffs[1] == diffs[0]+1 and a[diffs[0]] == b[diffs[1]] and a[diffs[1]] == b[diffs[0]])
+        short, long = (a,b) if len(a)<len(b) else (b,a)
+        return any(long[:i]+long[i+1:] == short for i in range(len(long)))
+    for domain in POPULAR_DOMAINS:
+        brand = domain.split('.')[0]
+        if len(brand) >= 5 and one_edit(label, brand):
+            return domain
     return None
 
 
 def redirect_chain_check(url: str, timeout: int = 8) -> dict[str, Any]:
-    """Follows redirects and flags long/suspicious redirect chains.
-    Fails safe (non-suspicious) on any network error."""
-    try:
-        resp = requests.head(
-            url, timeout=timeout, allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 TrustGuard/1.0"},
-        )
-        hops = len(resp.history)
-        final_host = urlparse(resp.url).hostname
-        return {
-            "hops": hops,
-            "finalHost": final_host,
-            "suspicious": hops >= 3,
-            "checked": True,
-        }
-    except Exception as exc:
-        logger.debug("redirect_chain_check failed for %s: %s", url, exc)
-        return {"hops": 0, "finalHost": None, "suspicious": False, "checked": False}
+    """Network redirect inspection is disabled until guarded transport is
+    used here too. Unknown is never represented as a successful check.
+    URL analysis remains lexical; no unguarded automatic redirect fetch.
+    """
+    return {"hops": 0, "finalHost": None, "suspicious": False, "checked": False}
 
 
 def domain_age_days(hostname: str) -> Optional[int]:

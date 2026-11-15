@@ -321,8 +321,12 @@ export const analyzeNews = async (
         '/analyze/news',
         payload,
         {
+          // Real web-search news analysis routinely takes 2-4.5 minutes
+          // (multiple search backends + per-article fetch + NLI). 90s
+          // timed out essentially every real request (504), so this
+          // budget matches measured end-to-end latency.
           timeout:
-            90000,
+            300000,
 
           headers
         }
@@ -390,7 +394,7 @@ export const analyzeNews = async (
 
         error: {
           message:
-            'News analysis timed out. Please try again.'
+            'News analysis timed out. Try again, or turn on Live analysis to watch each step stream in real time - the streaming route is not affected by this limit.'
         }
 
       });

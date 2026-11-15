@@ -78,4 +78,4 @@ export const trackTokenUsage = (req, res, next) => {
   next();
 };
 
-export { SECRET as JWT_SECRET_FOR_TESTS_ONLY };
+export { SECRET as JWT_SECRET_FOR_TESTS_ONLY, SECRET as AUTH_JWT_SECRET };

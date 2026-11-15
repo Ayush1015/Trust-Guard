@@ -1,17 +1,17 @@
 import { useMemo } from 'react';
 
 /**
- * ResultCard — "Certified Assessment" redesign
+ * ResultCard — assessment card redesign
  * ------------------------------------------------------------
  * Signature element: a wax-seal style verdict medallion (gold
  * hairline ring + tick marks) standing in for a bank/notary
- * certification stamp — because TrustGuard's job is literally
- * to certify whether something can be trusted.
+ * heuristic score display. TrustGuard shows model scores and
+ * uncertainty, never a certification of trustworthiness.
  *
  * Palette adds one deliberate accent — a champagne/gold hairline
  * — layered on top of the existing obsidian + cyan system, used
  * ONLY for structural framing (rules, seal ring, eyebrow) so it
- * reads as "certified document" rather than "decoration".
+ * reads as a document panel rather than decoration.
  *
  * All new variables fall back gracefully if not defined in your
  * global stylesheet — see the block of --rc-* custom properties
@@ -51,8 +51,8 @@ const UI = {
 
 const TYPE_META = {
   news: { icon: 'bi-newspaper', title: 'News Verification', doc: 'Editorial Integrity Report' },
-  review: { icon: 'bi-star', title: 'Review Verification', doc: 'Authenticity Assessment' },
-  phishing: { icon: 'bi-shield-lock', title: 'Phishing Analysis', doc: 'Domain Risk Certificate' },
+  review: { icon: 'bi-star', title: 'Writing Origin Estimate', doc: 'AI vs Human Writing Assessment' },
+  phishing: { icon: 'bi-shield-lock', title: 'Phishing Analysis', doc: 'Domain Risk Assessment' },
 };
 
 const GAUGE_GRADIENTS = {
@@ -63,6 +63,8 @@ const GAUGE_GRADIENTS = {
 
 function labelTone(label) {
   const value = String(label || '').toLowerCase();
+  if (value.includes('ai-generated') || value.includes('ai generated')) return 'danger';
+  if (value.includes('human-written') || value.includes('human written')) return 'success';
   if (value.includes('fake') || value.includes('phishing') || value.includes('malicious')) return 'danger';
   if (value.includes('real') || value.includes('genuine') || value.includes('safe')) return 'success';
   return 'warning';
@@ -142,10 +144,10 @@ function ModelChipList({ models }) {
 }
 
 // ---------------------------------------------------------------------------
-// Certification seal — circular gauge wrapped in a gold hairline + ticks
+// Score gauge — circular dial wrapped in a gold hairline + ticks
 // ---------------------------------------------------------------------------
 
-function CertificationSeal({ value = 0, tone = 'warning', size = 176, strokeWidth = 12 }) {
+function ScoreSeal({ value = 0, tone = 'warning', size = 176, strokeWidth = 12, caption = 'HEURISTIC SCORE' }) {
   const clamped = Math.max(0, Math.min(100, value ?? 0));
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -175,7 +177,7 @@ function CertificationSeal({ value = 0, tone = 'warning', size = 176, strokeWidt
         </linearGradient>
       </defs>
 
-      {/* Outer certification ring + engraved ticks */}
+      {/* Outer ring + engraved ticks */}
       <circle cx={center} cy={center} r={outerR} fill="none" stroke="var(--rc-gold-border)" strokeWidth="1" />
       {ticks}
 
@@ -198,7 +200,7 @@ function CertificationSeal({ value = 0, tone = 'warning', size = 176, strokeWidt
         {clamped}
       </text>
       <text x={center} y={center + 19} textAnchor="middle" fontSize="10" fill="var(--rc-gold)" letterSpacing="2.5">
-        CONFIDENCE
+        {caption}
       </text>
     </svg>
   );
@@ -261,7 +263,7 @@ function VotePieChart({ votes, size = 128 }) {
   );
 }
 
-function VoteLegend({ votes }) {
+function VoteLegend({ votes, labelMap }) {
   const entries = Object.entries(votes || {}).filter(([, count]) => count > 0);
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
   if (!entries.length) return null;
@@ -269,12 +271,13 @@ function VoteLegend({ votes }) {
   return (
     <ul className="list-unstyled mb-0 d-flex flex-column gap-2">
       {entries.map(([voteLabel, count]) => {
+        const displayLabel = (labelMap && labelMap[voteLabel]) || voteLabel;
         const pct = total ? Math.round((count / total) * 100) : 0;
         return (
           <li key={voteLabel} className="d-flex align-items-center justify-content-between gap-2">
             <span className="d-flex align-items-center gap-2 small" style={{ color: UI.muted }}>
-              <span className="rounded-circle flex-shrink-0" style={{ width: 9, height: 9, backgroundColor: toneColor(labelTone(voteLabel)) }} />
-              {voteLabel}
+              <span className="rounded-circle flex-shrink-0" style={{ width: 9, height: 9, backgroundColor: toneColor(labelTone(displayLabel)) }} />
+              {displayLabel}
             </span>
             <span className="small fw-semibold" style={{ color: UI.text }}>
               {count} <span style={{ color: UI.muted, fontWeight: 400 }}>({pct}%)</span>
@@ -310,7 +313,7 @@ function ConfidenceLedger({ models }) {
       <div className="d-flex align-items-center justify-content-between mb-1">
         <div className="small fw-semibold d-flex align-items-center gap-2" style={{ color: UI.muted }}>
           <i className="bi bi-bar-chart-steps" style={{ color: UI.gold }} />
-          Model Confidence Ledger
+          Model Score Ledger
         </div>
         <span className="small" style={{ color: UI.subtle }}>
           {rows.length} voter{rows.length === 1 ? '' : 's'}
@@ -319,7 +322,8 @@ function ConfidenceLedger({ models }) {
 
       <div className="d-flex flex-column">
         {rows.map((m, i) => {
-          const tone = labelTone(m.label);
+          const displayLabel = m.labelDisplay || m.label;
+          const tone = labelTone(displayLabel);
           const toneHex = toneColor(tone);
           const hasScore = m.confidence != null;
           const pct = hasScore ? Math.max(0, Math.min(100, m.confidence)) : null;
@@ -342,6 +346,15 @@ function ConfidenceLedger({ models }) {
               <div className="flex-grow-1 min-w-0">
                 <div className="small fw-medium text-truncate mb-1" style={{ color: UI.text }}>
                   {m.model}
+                  {m.evidenceType === 'topical_match_not_entailment' && (
+                    <span
+                      className="ms-2 px-2 rounded-pill"
+                      style={{ fontSize: '0.68rem', color: UI.muted, background: UI.chipBg, border: `1px solid ${UI.chipBorder}` }}
+                      title="Found by topic search; not claim-level verification"
+                    >
+                      topic match
+                    </span>
+                  )}
                 </div>
                 <div
                   style={{
@@ -372,7 +385,7 @@ function ConfidenceLedger({ models }) {
                   className="py-1 px-2"
                   style={{ fontSize: '0.66rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}
                 >
-                  {m.label}
+                  {displayLabel}
                 </ToneBadge>
                 <span
                   className="small fw-bold text-end"
@@ -403,15 +416,38 @@ export default function ResultCard({ result, type }) {
 
   const { label, confidence, metrics, explanation, riskLevel, urlVerification } = result;
   const votes = result.poll?.votes || metrics?.modelVotes || {};
-  const tone = labelTone(label);
+  const abstain = Boolean(result.poll?.abstain);
+  const abstainReasons = result.poll?.abstainReasons || [];
+  // News verdicts are model estimates (style/pattern signals), never
+  // verified facts: keep them in the amber 'estimate' tone even when the
+  // poll is confident, so the display can't read as a confirmed verdict.
+  const tone = abstain ? 'warning' : type === 'news' ? 'warning' : labelTone(label);
   const meta = TYPE_META[type] || TYPE_META.news;
   const hasVotes = Object.keys(votes).length > 0;
   const hasLedger = Array.isArray(result.models) && result.models.length > 0;
 
+  // Review labels are writing-origin estimates (AI-generated vs human-
+  // written), never genuineness or deception claims. The API provides
+  // normalized labelDisplay values; fall back to explicit mapping.
+  // Raw vote-label -> normalized display label, built from the API's
+  // per-model labelDisplay fields (review: writing-origin labels).
+  const voteLabelMap = useMemo(() => {
+    const map = {};
+    (result.models || []).forEach((m) => {
+      if (m && m.label && m.labelDisplay) map[m.label] = m.labelDisplay;
+    });
+    return map;
+  }, [result.models]);
+
   const friendlyLabel =
-    label === 'Real' ? 'Likely Real'
-    : label === 'Fake' ? 'Likely Fake'
-    : label === 'Genuine' ? 'Likely Genuine'
+    abstain ? 'Uncertain'
+    : type === 'review'
+      ? (result.labelDisplay
+          || (label === 'Genuine' ? 'Likely Human-Written'
+            : label === 'Fake' ? 'Likely AI-Generated'
+            : label || 'Unknown'))
+    : label === 'Real' ? 'Model leans Real'
+    : label === 'Fake' ? 'Model leans Fake'
     : label === 'Safe' ? 'Looks Safe'
     : label === 'Phishing' ? 'Likely Phishing'
     : label || 'Unknown';
@@ -491,7 +527,7 @@ export default function ResultCard({ result, type }) {
       <div className="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4 rc-fade-up">
         <div>
           <div className="rc-eyebrow small mb-1" style={{ fontSize: '0.7rem' }}>
-            {meta.doc} · Ensemble Certified
+            {meta.doc} · {abstain ? 'Ensemble Analysis · Limited Evidence' : 'Ensemble Analysis'}
           </div>
           <div className="d-flex align-items-center gap-2">
             <span
@@ -516,7 +552,7 @@ export default function ResultCard({ result, type }) {
       <div className="row g-3 mb-4 rc-fade-up" style={{ animationDelay: '60ms' }}>
         <div className={hasVotes ? 'col-lg-4' : 'col-lg-5'}>
           <Tile className="d-flex align-items-center justify-content-center text-center" hover={false}>
-            <CertificationSeal value={confidence} tone={tone} />
+            <ScoreSeal value={confidence} tone={tone} caption={abstain ? 'LOW EVIDENCE' : 'HEURISTIC SCORE'} />
           </Tile>
         </div>
 
@@ -529,6 +565,35 @@ export default function ResultCard({ result, type }) {
             <p className="m-0" style={{ color: UI.muted, fontSize: '0.92rem', lineHeight: 1.6 }}>
               {explanation || 'No explanation was returned for this analysis.'}
             </p>
+            {result.taskSemantics && (
+              <div className="mt-3 small" style={{ color: UI.subtle, fontSize: '0.8rem', lineHeight: 1.5 }}>
+                <i className="bi bi-info-circle me-1" style={{ color: UI.gold }} />
+                {result.taskSemantics.caveat}
+              </div>
+            )}
+            {type === 'news' && !abstain && (
+              <div className="mt-3 small" style={{ color: UI.subtle, fontSize: '0.8rem', lineHeight: 1.5 }}>
+                <i className="bi bi-info-circle me-1" style={{ color: UI.gold }} />
+                Model estimate from text patterns and style signals - not
+                independently verified against external sources or fact-checks.
+              </div>
+            )}
+            {abstain && (
+              <div
+                className="mt-3 p-2 rounded-3 d-flex align-items-start gap-2"
+                style={{ background: 'var(--rc-warning-soft)', border: '1px solid var(--rc-warning-border)', fontSize: '0.82rem', color: UI.muted }}
+                role="note"
+              >
+                <i className="bi bi-exclamation-triangle" style={{ color: '#f59e0b' }} />
+                <span>
+                  The ensemble did not reach a confident verdict
+                  {abstainReasons.includes('tied_scores') && ' - the models are split'}
+                  {abstainReasons.includes('low_confidence') && ' - the combined evidence is weak'}
+                  {abstainReasons.includes('no_participating_models') && ' - no model produced a usable result'}
+                  . Treat this as inconclusive, not as {friendlyLabel === 'Uncertain' ? 'a verdict either way' : 'confirmed'}.
+                </span>
+              </div>
+            )}
           </Tile>
         </div>
 
@@ -544,7 +609,7 @@ export default function ResultCard({ result, type }) {
                   <VotePieChart votes={votes} />
                 </div>
                 <div className="col">
-                  <VoteLegend votes={votes} />
+                  <VoteLegend votes={votes} labelMap={voteLabelMap} />
                 </div>
               </div>
             </Tile>
@@ -578,12 +643,18 @@ export default function ResultCard({ result, type }) {
                 value={result.poll ? `${result.poll.winningVotes} / ${result.poll.totalVotes}` : 'N/A'}
               />
             </div>
-            <div className="col-12">
-              <Tile>
-                <div className="small mb-1" style={{ color: UI.muted }}>Models Consulted</div>
-                <ModelChipList models={metrics?.participatingModels} />
-              </Tile>
-            </div>
+            {(metrics?.participatingModels?.length > 0 || hasLedger) && (
+              <div className="col-12">
+                <Tile>
+                  <div className="small mb-1" style={{ color: UI.muted }}>Models Consulted</div>
+                  <ModelChipList
+                    models={metrics?.participatingModels?.length
+                      ? metrics.participatingModels
+                      : result.models.map((m) => m.model)}
+                  />
+                </Tile>
+              </div>
+            )}
           </>
         )}
 
@@ -591,23 +662,8 @@ export default function ResultCard({ result, type }) {
           <>
             <div className="col-md-6">
               <Tile>
-                <div className="d-flex justify-content-between mb-1 small" style={{ color: UI.muted }}>
-                  <span>Spam Pattern Score</span>
-                  <span className="fw-bold" style={{ color: (metrics?.spamScore ?? 0) > 50 ? UI.danger : UI.success }}>
-                    {metrics?.spamScore ?? 0}%
-                  </span>
-                </div>
-                <div className="rc-bar-track">
-                  <div
-                    className="rc-bar-fill"
-                    style={{
-                      width: `${metrics?.spamScore ?? 0}%`,
-                      background: (metrics?.spamScore ?? 0) > 50
-                        ? `linear-gradient(90deg, ${UI.danger}99, ${UI.danger})`
-                        : `linear-gradient(90deg, ${UI.success}99, ${UI.success})`,
-                    }}
-                  />
-                </div>
+                <div className="small" style={{ color: UI.muted }}>Task scope</div>
+                <div className="small" style={{ color: UI.text }}>Writing origin only. No spam, deception or authenticity score is established.</div>
               </Tile>
             </div>
 
@@ -672,7 +728,7 @@ export default function ResultCard({ result, type }) {
           <>
             <div className="col-md-6 col-lg-3">
               <Tile className="text-center">
-                <div className="small mb-1" style={{ color: UI.muted }}>Threat Risk Level</div>
+                <div className="small mb-1" style={{ color: UI.muted }}>Model risk estimate</div>
                 <ToneBadge
                   tone={riskLevel === 'High' ? 'danger' : riskLevel === 'Medium' ? 'warning' : 'success'}
                   className="px-2 py-1"
@@ -684,12 +740,12 @@ export default function ResultCard({ result, type }) {
 
             <div className="col-md-6 col-lg-3">
               <Tile className="text-center">
-                <div className="small mb-1" style={{ color: UI.muted }}>SSL Certificate</div>
+                <div className="small mb-1" style={{ color: UI.muted }}>URL scheme</div>
                 <div className="fw-bold" style={{ fontSize: '0.9rem' }}>
                   {metrics?.sslValid ? (
-                    <span style={{ color: UI.success }}><i className="bi bi-shield-fill-check me-1" />Secure HTTPS</span>
+                    <span style={{ color: UI.success }}><i className="bi bi-shield-fill-check me-1" />Uses HTTPS (certificate not checked)</span>
                   ) : (
-                    <span style={{ color: UI.danger }}><i className="bi bi-shield-fill-x me-1" />Insecure HTTP</span>
+                    <span style={{ color: UI.danger }}><i className="bi bi-shield-fill-x me-1" />Uses HTTP</span>
                   )}
                 </div>
               </Tile>
@@ -728,11 +784,11 @@ export default function ResultCard({ result, type }) {
         )}
       </div>
 
-      {/* Certification footer */}
+      {/* Analysis footer */}
       <div className="rc-doc-footer d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 pt-3 rc-fade-up" style={{ animationDelay: '240ms' }}>
         <span className="small" style={{ color: UI.subtle }}>
           <i className="bi bi-award me-1" style={{ color: UI.gold }} />
-          TrustGuard Ensemble Certification — model-based assessment, not a guarantee
+          TrustGuard ensemble analysis — heuristic model scores, not a guarantee
         </span>
         <span className="small" style={{ color: UI.subtle }}>
           {new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
@@ -740,4 +796,4 @@ export default function ResultCard({ result, type }) {
       </div>
     </div>
   );
-}
+                        }
